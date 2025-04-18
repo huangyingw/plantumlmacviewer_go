@@ -1,0 +1,58 @@
+@startuml
+' 这是一个示例PlantUML类图
+
+' 类定义
+class PlantUMLViewer {
+  - window: fyne.Window
+  - files: []string
+  - tabs: *container.DocTabs
+  + NewMainUI(window, files)
+  + InitializeUI() fyne.CanvasObject
+  + openFile(filePath string)
+  + openFileDialog()
+  + GetContent() fyne.CanvasObject
+}
+
+class PlantUMLRenderer {
+  - filePath: string
+  - content: string
+  - imageView: *canvas.Image
+  + NewViewer(filePath string)
+  + renderPlantUML()
+  + renderUsingJar()
+  + renderUsingOnlineService()
+  + GetCanvas() fyne.CanvasObject
+}
+
+' 关系定义
+PlantUMLViewer --> PlantUMLRenderer : uses >
+PlantUMLViewer *-- "many" File : contains >
+
+' 其他元素
+package "UI Components" {
+  class Window
+  class Container
+  class Dialog
+}
+
+package "Rendering" {
+  class Image
+  class Resource
+}
+
+' 注释和标题
+note bottom of PlantUMLRenderer
+  负责将PlantUML代码
+  渲染为图像
+end note
+
+note right of PlantUMLViewer
+  主UI类负责处理应用程序的
+  整体界面和文件管理
+end note
+
+' 布局调整
+title PlantUML Viewer 应用架构图
+footer 示例图 - Page %page% of %lastpage%
+
+@enduml 
