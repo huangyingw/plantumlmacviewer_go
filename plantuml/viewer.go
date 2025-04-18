@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -69,29 +71,43 @@ func (v *Viewer) GetCanvas() fyne.CanvasObject {
 
 // renderPlantUML 渲染PlantUML图表
 func (v *Viewer) renderPlantUML() {
-	// 显示加载指示器
+	// 创建加载指示器
 	loadingLabel := widget.NewLabel("正在渲染...")
 	loadingLabel.Alignment = fyne.TextAlignCenter
-	v.container.Objects[0] = container.NewCenter(loadingLabel)
-	v.container.Refresh()
 
-	v.imageView.Resource = nil
-	v.imageView.Refresh()
+	// 在UI线程中更新界面
+	fyne.Do(func() {
+		v.container.Objects[0] = container.NewCenter(loadingLabel)
+		v.container.Refresh()
+	})
+
+	log.Printf("开始渲染文件: %s", v.filePath)
 
 	// 优先尝试使用!pragma处理图表 (不需要graphviz)
 	contentWithPragma := v.addPragmaIfNeeded(v.content)
 
-	// 使用本地的plantuml.jar
-	if img, err := v.renderUsingJar(contentWithPragma); err == nil {
+	// 先尝试使用命令行工具
+	img, err := v.renderUsingCommandLine(contentWithPragma)
+	if err != nil {
+		log.Printf("使用命令行工具渲染失败: %v，尝试使用JAR...", err)
+		// 如果命令行工具失败，尝试使用JAR
+		img, err = v.renderUsingJar(contentWithPragma)
+		if err != nil {
+			log.Printf("使用JAR渲染也失败: %v", err)
+			v.showRenderError(fmt.Sprintf("无法渲染PlantUML图表: %v", err))
+			return
+		}
+	}
+
+	// 渲染成功，更新UI
+	fyne.Do(func() {
 		v.imageView.Resource = img
 		v.container.Objects[0] = container.NewScroll(v.imageView)
 		v.container.Refresh()
 		v.rendered = true
-		return
-	}
+	})
 
-	// 如果渲染失败，显示错误
-	v.showRenderError("无法渲染PlantUML图表，请确保安装了Java和PlantUML。")
+	log.Printf("成功渲染文件: %s", v.filePath)
 }
 
 // addPragmaIfNeeded 添加!pragma指令以避免需要graphviz
@@ -117,6 +133,94 @@ func (v *Viewer) addPragmaIfNeeded(content string) string {
 	return content
 }
 
+// renderUsingCommandLine 使用plantuml命令行工具渲染
+func (v *Viewer) renderUsingCommandLine(content string) (fyne.Resource, error) {
+	// 检查命令行工具是否存在
+	_, err := exec.LookPath("plantuml")
+	if err != nil {
+		return nil, fmt.Errorf("找不到plantuml命令行工具: %v", err)
+	}
+
+	// 创建临时文件保存修改后的内容
+	tempDir := os.TempDir()
+	tempFile := filepath.Join(tempDir, "temp_"+filepath.Base(v.filePath))
+
+	// 写入修改后的内容到临时文件
+	if err := ioutil.WriteFile(tempFile, []byte(content), 0644); err != nil {
+		return nil, fmt.Errorf("无法创建临时文件: %v", err)
+	}
+	defer os.Remove(tempFile) // 删除临时文件
+
+	// 注意：plantuml命令默认会在相同目录下生成PNG文件，输出路径是tempFile+".png"
+	outputPath := tempFile + ".png"
+
+	// 执行plantuml命令
+	log.Printf("执行命令: plantuml -tpng %s", tempFile)
+	cmd := exec.Command("plantuml", "-tpng", tempFile)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		log.Printf("执行失败，stderr: %s, stdout: %s", stderr.String(), stdout.String())
+		return nil, fmt.Errorf("执行plantuml命令失败: %v, %s", err, stderr.String())
+	}
+
+	log.Printf("命令执行成功")
+
+	// 检查输出文件是否存在
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+		log.Printf("警告: 输出文件不存在: %s，尝试查找其他可能的输出文件", outputPath)
+		// 先尝试查找同名但不同扩展名的文件
+		for _, ext := range []string{".png", ".svg", ".eps"} {
+			possiblePath := tempFile + ext
+			if _, err := os.Stat(possiblePath); err == nil {
+				log.Printf("找到可能的输出文件: %s", possiblePath)
+				outputPath = possiblePath
+				break
+			}
+		}
+
+		// 如果还是找不到，尝试查找tempDir中的所有图像文件
+		if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+			files, _ := filepath.Glob(filepath.Join(tempDir, "*.png"))
+			// 查找最新创建的文件
+			var newestFile string
+			var newestTime time.Time
+			for _, file := range files {
+				fileInfo, err := os.Stat(file)
+				if err == nil {
+					if newestFile == "" || fileInfo.ModTime().After(newestTime) {
+						newestFile = file
+						newestTime = fileInfo.ModTime()
+					}
+				}
+			}
+
+			if newestFile != "" {
+				log.Printf("找到最新的输出文件: %s", newestFile)
+				outputPath = newestFile
+			} else {
+				return nil, fmt.Errorf("无法找到生成的图像文件")
+			}
+		}
+	}
+
+	// 读取生成的图像
+	imgData, err := ioutil.ReadFile(outputPath)
+	if err != nil {
+		return nil, fmt.Errorf("无法读取生成的图像: %v", err)
+	}
+
+	log.Printf("成功读取图像文件，大小: %d 字节", len(imgData))
+	defer os.Remove(outputPath) // 删除临时生成的图像
+
+	// 创建Fyne资源
+	res := fyne.NewStaticResource("plantuml_image.png", imgData)
+	return res, nil
+}
+
 // renderUsingJar 使用本地jar文件渲染
 func (v *Viewer) renderUsingJar(content string) (fyne.Resource, error) {
 	// 创建临时文件保存修改后的内容
@@ -131,15 +235,24 @@ func (v *Viewer) renderUsingJar(content string) (fyne.Resource, error) {
 
 	outputPath := filepath.Join(tempDir, filepath.Base(tempFile)+".png")
 
+	// 先检查Java是否可用
+	javaCmd := exec.Command("java", "-version")
+	if err := javaCmd.Run(); err != nil {
+		return nil, fmt.Errorf("Java未安装或不可用: %v", err)
+	}
+
 	// 查找可能的plantuml.jar路径
 	jarPaths := []string{
 		"/usr/local/bin/plantuml.jar",
-		"/usr/local/Cellar/plantuml/*/plantuml.jar", // homebrew安装路径
+		"/usr/local/Cellar/plantuml/*/libexec/plantuml.jar", // 根据实际情况找到的Homebrew安装路径
+		"/usr/local/Cellar/plantuml/*/plantuml.jar",         // homebrew安装路径
 		"/opt/plantuml/plantuml.jar",
 		"/usr/share/plantuml/plantuml.jar",
 		"/Applications/plantuml.jar",
 		filepath.Join(os.Getenv("HOME"), "plantuml.jar"),
 		filepath.Join(os.Getenv("HOME"), "bin/plantuml.jar"),
+		filepath.Join(os.Getenv("HOME"), ".plantuml/plantuml.jar"),
+		filepath.Join(os.Getenv("HOME"), "/Downloads/plantuml.jar"),
 	}
 
 	var jarPath string
@@ -149,25 +262,61 @@ func (v *Viewer) renderUsingJar(content string) (fyne.Resource, error) {
 			matches, err := filepath.Glob(path)
 			if err == nil && len(matches) > 0 {
 				jarPath = matches[0]
+				log.Printf("找到PlantUML JAR包: %s", jarPath)
 				break
 			}
 		} else if _, err := os.Stat(path); err == nil {
 			jarPath = path
+			log.Printf("找到PlantUML JAR包: %s", jarPath)
 			break
 		}
 	}
 
 	if jarPath == "" {
-		return nil, fmt.Errorf("找不到plantuml.jar")
+		// 如果找不到JAR文件，尝试使用命令行工具
+		if _, err := exec.LookPath("plantuml"); err == nil {
+			log.Printf("找到PlantUML命令行工具，尝试使用它")
+			cmd := exec.Command("plantuml", "-tpng", tempFile, "-o", tempDir)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+
+			if err := cmd.Run(); err != nil {
+				return nil, fmt.Errorf("执行plantuml命令失败: %v, %s", err, stderr.String())
+			}
+
+			log.Printf("使用PlantUML命令行工具渲染成功")
+		} else {
+			log.Printf("找不到plantuml.jar或命令行工具，请确保已安装PlantUML")
+			return nil, fmt.Errorf("找不到plantuml.jar或命令行工具，请确保已安装PlantUML")
+		}
+	} else {
+		// 执行plantuml.jar来生成图像
+		log.Printf("执行命令: java -jar %s -tpng %s -o %s", jarPath, tempFile, tempDir)
+		cmd := exec.Command("java", "-jar", jarPath, "-tpng", tempFile, "-o", tempDir)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
+
+		if err := cmd.Run(); err != nil {
+			log.Printf("执行失败，stderr: %s, stdout: %s", stderr.String(), stdout.String())
+			return nil, fmt.Errorf("执行plantuml失败: %v, %s", err, stderr.String())
+		}
+
+		log.Printf("使用JAR执行成功，输出路径: %s", outputPath)
 	}
 
-	// 执行plantuml.jar来生成图像
-	cmd := exec.Command("java", "-jar", jarPath, "-tpng", tempFile, "-o", tempDir)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("执行plantuml失败: %v, %s", err, stderr.String())
+	// 检查输出文件是否存在
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+		log.Printf("警告: 输出文件不存在: %s", outputPath)
+		// 尝试查找可能的输出文件
+		files, _ := filepath.Glob(filepath.Join(tempDir, "*.png"))
+		if len(files) > 0 {
+			log.Printf("找到可能的输出文件: %s", files[0])
+			outputPath = files[0]
+		} else {
+			return nil, fmt.Errorf("无法找到生成的图像文件")
+		}
 	}
 
 	// 读取生成的图像
@@ -176,6 +325,7 @@ func (v *Viewer) renderUsingJar(content string) (fyne.Resource, error) {
 		return nil, fmt.Errorf("无法读取生成的图像: %v", err)
 	}
 
+	log.Printf("成功读取图像文件，大小: %d 字节", len(imgData))
 	defer os.Remove(outputPath) // 删除临时生成的图像
 
 	// 创建Fyne资源
@@ -185,6 +335,8 @@ func (v *Viewer) renderUsingJar(content string) (fyne.Resource, error) {
 
 // showRenderError 显示渲染错误
 func (v *Viewer) showRenderError(message string) {
+	log.Printf("渲染错误: %s", message)
+
 	errorText := widget.NewLabel(message)
 	errorText.Alignment = fyne.TextAlignCenter
 
@@ -198,7 +350,9 @@ func (v *Viewer) showRenderError(message string) {
 		container.NewCenter(retryButton),
 	)
 
-	// 替换内容
-	v.container.Objects[0] = container.NewCenter(errorContainer)
-	v.container.Refresh()
+	// 在UI线程中更新界面
+	fyne.Do(func() {
+		v.container.Objects[0] = container.NewCenter(errorContainer)
+		v.container.Refresh()
+	})
 }
