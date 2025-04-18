@@ -1,0 +1,38 @@
+@startuml
+!pragma layout smetana
+
+title "序列图示例"
+
+actor 用户
+participant "PlantUML查看器" as App
+participant "渲染引擎" as Engine
+database "临时文件" as TempFile
+
+== 初始化 ==
+用户 -> App : 启动应用(文件路径)
+activate App
+App -> App : 验证文件
+App -> Engine : 初始化渲染引擎
+activate Engine
+Engine --> App : 初始化完成
+deactivate Engine
+
+== 渲染流程 ==
+App -> Engine : 请求渲染图像
+activate Engine
+Engine -> TempFile : 创建临时文件
+activate TempFile
+TempFile --> Engine : 文件创建成功
+Engine -> Engine : 调用PlantUML Jar
+Engine -> TempFile : 生成PNG图像
+TempFile --> Engine : 返回图像路径
+deactivate TempFile
+Engine -> Engine : 加载图像
+Engine --> App : 返回渲染结果
+deactivate Engine
+
+App -> App : 显示图像
+App --> 用户 : 显示渲染后的图像
+deactivate App
+
+@enduml 

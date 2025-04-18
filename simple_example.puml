@@ -1,0 +1,30 @@
+@startuml
+!pragma layout smetana
+
+title "Simple PlantUML Viewer Demo"
+
+' 定义几个简单的类
+class PlantUMLViewer {
+  + main()
+  + renderImage()
+  + openFile()
+}
+
+class ImageRenderer {
+  - renderEngine
+  + render()
+  + exportImage()
+}
+
+' 添加关系
+PlantUMLViewer --> ImageRenderer : uses >
+
+' 添加注释
+note right of PlantUMLViewer
+  简单的演示示例
+  用于测试渲染效果
+end note
+
+footer Generated for test
+
+@enduml 
