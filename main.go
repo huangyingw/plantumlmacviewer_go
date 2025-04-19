@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/theme"
 
 	"plantumlmacviewer/ui"
@@ -37,6 +39,9 @@ const ipcAddr = "/tmp/plantumlviewer.sock"
 var lockFileHandle *os.File
 
 func main() {
+	// 设置日志输出到文件
+	setupLogger()
+
 	// 解析命令行参数
 	showVersion := flag.Bool("version", false, "显示版本信息")
 	showHelp := flag.Bool("help", false, "显示帮助信息")
@@ -95,8 +100,12 @@ func main() {
 	// 创建主窗口
 	mainWindow = fyneApp.NewWindow("PlantUML Viewer")
 
-	// 设置窗口为最大化，而不是全屏
-	mainWindow.Resize(fyne.NewSize(3840, 2160)) // 设置较大的初始尺寸
+	// 获取屏幕尺寸
+	primaryMonitor := mainWindow.Canvas().Size()
+	// 使用屏幕尺寸的80%作为窗口尺寸，确保不会超出屏幕边界
+	initialWidth := primaryMonitor.Width * 0.8
+	initialHeight := primaryMonitor.Height * 0.8
+	mainWindow.Resize(fyne.NewSize(initialWidth, initialHeight))
 
 	// 居中显示窗口
 	mainWindow.CenterOnScreen()
@@ -107,8 +116,8 @@ func main() {
 		time.Sleep(100 * time.Millisecond)
 		fyne.Do(func() {
 			// 使用最大化，而不是全屏
-			mainWindow.SetFullScreen(false)             // 确保不是全屏
-			mainWindow.Resize(fyne.NewSize(3840, 2160)) // 再次设置较大尺寸以触发最大化
+			mainWindow.SetFullScreen(false)                              // 确保不是全屏
+			mainWindow.Resize(fyne.NewSize(initialWidth, initialHeight)) // 再次设置尺寸以确保适应
 		})
 	}()
 
@@ -140,6 +149,38 @@ func main() {
 
 	// 显示窗口并运行应用
 	mainWindow.ShowAndRun()
+}
+
+// setupLogger 配置日志输出到文件
+func setupLogger() {
+	// 获取当前执行程序所在目录
+	execPath, err := os.Executable()
+	if err != nil {
+		log.Printf("获取程序路径失败: %v", err)
+		return
+	}
+	execDir := filepath.Dir(execPath)
+
+	// 日志文件路径（放在程序所在目录下）
+	logFilePath := filepath.Join(execDir, "plantumlviewer.log")
+
+	// 创建或截断日志文件
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		log.Printf("无法创建日志文件: %v", err)
+		return
+	}
+
+	// 设置日志同时输出到文件和标准输出
+	multiWriter := io.MultiWriter(logFile, os.Stdout)
+	log.SetOutput(multiWriter)
+
+	// 设置日志前缀和标志
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+
+	// 记录应用启动信息
+	log.Printf("PlantUML Viewer v%s 启动", version)
+	log.Printf("日志文件位置: %s", logFilePath)
 }
 
 // isAppRunning 检查应用程序是否已在运行（通过检查锁文件）
@@ -417,6 +458,15 @@ func validateFiles(files []string) []string {
 func setupShortcuts() {
 	// 完全重新实现键盘事件处理，确保Tab键后方向键仍然有效
 	canvas := mainWindow.Canvas()
+
+	// 添加Cmd+W快捷键（关闭当前标签页）
+	cmdW := &desktop.CustomShortcut{KeyName: fyne.KeyW, Modifier: desktop.SuperModifier}
+	canvas.AddShortcut(cmdW, func(shortcut fyne.Shortcut) {
+		log.Println("处理Cmd+W快捷键: 关闭当前标签页")
+		if mainUI != nil {
+			mainUI.CloseCurrentTab()
+		}
+	})
 
 	// 设置一个键盘事件处理函数
 	canvas.SetOnTypedKey(func(ke *fyne.KeyEvent) {
