@@ -114,7 +114,12 @@ func main() {
 
 	// 设置窗口关闭事件
 	mainWindow.SetCloseIntercept(func() {
-		// 关闭窗口时，移除锁文件并退出
+		// 关闭窗口时，停止所有文件监控
+		if mainUI != nil {
+			mainUI.StopAllMonitoring()
+		}
+
+		// 移除锁文件并退出
 		removeLockFile()
 		mainWindow.Close()
 	})
