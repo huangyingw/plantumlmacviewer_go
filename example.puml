@@ -52,7 +52,6 @@ note right of PlantUMLViewer
 end note
 
 ' 布局调整
-title PlantUML Viewer 应用架构图
 footer 示例图 - Page %page% of %lastpage%
 
 @enduml 
