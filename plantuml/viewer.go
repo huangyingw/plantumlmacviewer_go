@@ -26,6 +26,7 @@ type Viewer struct {
 	rendered       bool
 	lastModified   time.Time // 文件最后修改时间
 	stopMonitoring chan bool // 停止监控的信号通道
+	onFileChanged  func()    // 文件变化时的回调函数
 }
 
 // NewViewer 创建新的PlantUML查看器
@@ -563,6 +564,12 @@ func (v *Viewer) monitorFile() {
 					// 使用UI线程更新，确保UI操作线程安全
 					fyne.Do(func() {
 						go v.renderPlantUML() // 在UI线程中启动渲染
+
+						// 如果设置了回调函数，调用它
+						if v.onFileChanged != nil {
+							log.Printf("调用文件变化回调函数")
+							v.onFileChanged()
+						}
 					})
 				} else {
 					log.Printf("文件修改时间或大小变化，但内容未变，不需刷新")
@@ -579,4 +586,9 @@ func (v *Viewer) monitorFile() {
 // StopMonitoring 停止文件监控
 func (v *Viewer) StopMonitoring() {
 	v.stopMonitoring <- true
+}
+
+// SetOnFileChanged 设置文件变化时的回调函数
+func (v *Viewer) SetOnFileChanged(callback func()) {
+	v.onFileChanged = callback
 }
