@@ -1,0 +1,7 @@
+@startuml
+title 长文件名测试
+class LongNameTest {
+  +testMethod()
+}
+note right: 这是一个测试长文件名的例子
+@enduml 
