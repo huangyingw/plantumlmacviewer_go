@@ -19,17 +19,20 @@ import (
 
 // Viewer 表示PlantUML查看器
 type Viewer struct {
-	filePath  string
-	content   string
-	imageView *canvas.Image
-	container *fyne.Container
-	rendered  bool
+	filePath       string
+	content        string
+	imageView      *canvas.Image
+	container      *fyne.Container
+	rendered       bool
+	lastModified   time.Time // 文件最后修改时间
+	stopMonitoring chan bool // 停止监控的信号通道
 }
 
 // NewViewer 创建新的PlantUML查看器
 func NewViewer(filePath string) (*Viewer, error) {
 	// 检查文件是否存在
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	fileInfo, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
 		return nil, fmt.Errorf("文件不存在: %s", filePath)
 	}
 
@@ -41,8 +44,10 @@ func NewViewer(filePath string) (*Viewer, error) {
 
 	// 创建查看器
 	viewer := &Viewer{
-		filePath: filePath,
-		content:  string(content),
+		filePath:       filePath,
+		content:        string(content),
+		lastModified:   fileInfo.ModTime(),
+		stopMonitoring: make(chan bool),
 	}
 
 	// 初始化UI组件
@@ -56,6 +61,9 @@ func NewViewer(filePath string) (*Viewer, error) {
 		// 如果同步渲染失败，则使用异步方式作为备选方案
 		go viewer.renderPlantUML()
 	}
+
+	// 启动文件监控
+	go viewer.monitorFile()
 
 	return viewer, nil
 }
@@ -495,4 +503,80 @@ func (v *Viewer) calculateOptimalDPI(content string) int {
 
 	// 简单图表使用基本DPI
 	return baseDPI // 72
+}
+
+// monitorFile 监控文件变化并在变化时自动刷新
+func (v *Viewer) monitorFile() {
+	// 为了减少CPU使用，不使用过于频繁的ticker
+	ticker := time.NewTicker(500 * time.Millisecond) // 每500毫秒检查一次文件变化
+	defer ticker.Stop()
+
+	log.Printf("开始监控文件: %s", v.filePath)
+
+	// 为防止频繁刷新，添加刷新冷却时间
+	lastRefreshTime := time.Now()
+	refreshCooldown := 1 * time.Second // 两次刷新之间最短的时间间隔
+
+	// 记录文件大小，用于快速检测文件是否变化
+	fileInfo, err := os.Stat(v.filePath)
+	var lastSize int64 = 0
+	if err == nil {
+		lastSize = fileInfo.Size()
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			// 检查文件是否被修改
+			fileInfo, err := os.Stat(v.filePath)
+			if err != nil {
+				log.Printf("监控文件时出错: %v", err)
+				continue
+			}
+
+			// 快速检查：如果文件大小没变，通常内容也没变
+			currentSize := fileInfo.Size()
+			currentModTime := fileInfo.ModTime()
+
+			// 检查文件大小和修改时间是否有变化
+			if (currentSize != lastSize || currentModTime.After(v.lastModified)) &&
+				time.Since(lastRefreshTime) > refreshCooldown {
+
+				log.Printf("检测到文件 %s 可能有变化，检查内容", v.filePath)
+
+				// 文件可能已修改，读取内容确认
+				content, err := ioutil.ReadFile(v.filePath)
+				if err != nil {
+					log.Printf("读取已更改文件失败: %v", err)
+					continue
+				}
+
+				// 只有当内容真的变了才重新渲染
+				newContent := string(content)
+				if newContent != v.content {
+					log.Printf("文件内容确实有变化，准备刷新显示")
+					v.content = newContent
+					v.lastModified = currentModTime
+					lastSize = currentSize
+					lastRefreshTime = time.Now()
+
+					// 使用UI线程更新，确保UI操作线程安全
+					fyne.Do(func() {
+						go v.renderPlantUML() // 在UI线程中启动渲染
+					})
+				} else {
+					log.Printf("文件修改时间或大小变化，但内容未变，不需刷新")
+				}
+			}
+		case <-v.stopMonitoring:
+			// 收到停止监控的信号
+			log.Printf("停止监控文件: %s", v.filePath)
+			return
+		}
+	}
+}
+
+// StopMonitoring 停止文件监控
+func (v *Viewer) StopMonitoring() {
+	v.stopMonitoring <- true
 }
