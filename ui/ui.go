@@ -15,8 +15,9 @@ import (
 type MainUI struct {
 	window      fyne.Window
 	files       []string
-	Tabs        *container.DocTabs // 导出字段以便可以从外部访问
-	OpenedFiles map[string]int     // 导出字段以便可以从外部访问
+	Tabs        *container.DocTabs          // 导出字段以便可以从外部访问
+	OpenedFiles map[string]int              // 导出字段以便可以从外部访问
+	viewers     map[string]*plantuml.Viewer // 存储查看器引用，用于管理文件监控
 }
 
 // NewMainUI 创建新的UI实例
@@ -25,6 +26,7 @@ func NewMainUI(window fyne.Window, files []string) (*MainUI, error) {
 		window:      window,
 		files:       files,
 		OpenedFiles: make(map[string]int),
+		viewers:     make(map[string]*plantuml.Viewer),
 	}
 	return ui, nil
 }
@@ -38,6 +40,35 @@ func (ui *MainUI) InitializeUI() fyne.CanvasObject {
 	// 如果有文件参数传入，立即打开它们
 	for _, file := range ui.files {
 		ui.OpenFile(file)
+	}
+
+	// 监听标签关闭事件，从OpenedFiles中移除并停止文件监控
+	ui.Tabs.OnClosed = func(item *container.TabItem) {
+		// 查找并移除关闭的文件
+		for path, index := range ui.OpenedFiles {
+			if filepath.Base(path) == item.Text {
+				// 停止文件监控
+				if viewer, exists := ui.viewers[path]; exists {
+					log.Printf("停止对文件 %s 的监控", path)
+					viewer.StopMonitoring()
+					delete(ui.viewers, path)
+				}
+
+				delete(ui.OpenedFiles, path)
+				// 更新其他文件的索引
+				for otherPath, otherIndex := range ui.OpenedFiles {
+					if otherIndex > index {
+						ui.OpenedFiles[otherPath] = otherIndex - 1
+					}
+				}
+				break
+			}
+		}
+	}
+
+	// 监听标签选择事件，更新窗口标题
+	ui.Tabs.OnSelected = func(item *container.TabItem) {
+		ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", item.Text))
 	}
 
 	// 直接返回tabs容器作为主布局
@@ -60,9 +91,18 @@ func (ui *MainUI) OpenFile(filePath string) {
 		// 立即刷新当前标签内容，确保显示最新内容
 		log.Printf("正在刷新已打开的文件: %s", filePath)
 
+		// 停止旧的查看器监控
+		if oldViewer, exists := ui.viewers[filePath]; exists {
+			oldViewer.StopMonitoring()
+			delete(ui.viewers, filePath)
+		}
+
 		// 重新创建PlantUML查看器
 		newViewer, err := plantuml.NewViewer(filePath)
 		if err == nil {
+			// 存储新的查看器引用
+			ui.viewers[filePath] = newViewer
+
 			// 成功创建新查看器，替换现有内容
 			newContent := container.NewScroll(newViewer.GetCanvas())
 			ui.Tabs.Items[tabIndex].Content = newContent
@@ -79,6 +119,9 @@ func (ui *MainUI) OpenFile(filePath string) {
 		log.Printf("无法创建PlantUML查看器: %v", err)
 		return
 	}
+
+	// 存储查看器引用
+	ui.viewers[filePath] = viewer
 
 	// 创建标签项
 	fileName := filepath.Base(filePath)
@@ -98,28 +141,6 @@ func (ui *MainUI) OpenFile(filePath string) {
 
 	// 更新窗口标题
 	ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", fileName))
-
-	// 监听标签关闭事件，从OpenedFiles中移除
-	ui.Tabs.OnClosed = func(item *container.TabItem) {
-		// 查找并移除关闭的文件
-		for path, index := range ui.OpenedFiles {
-			if filepath.Base(path) == item.Text {
-				delete(ui.OpenedFiles, path)
-				// 更新其他文件的索引
-				for otherPath, otherIndex := range ui.OpenedFiles {
-					if otherIndex > index {
-						ui.OpenedFiles[otherPath] = otherIndex - 1
-					}
-				}
-				break
-			}
-		}
-	}
-
-	// 监听标签选择事件，更新窗口标题
-	ui.Tabs.OnSelected = func(item *container.TabItem) {
-		ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", item.Text))
-	}
 }
 
 // RefreshCurrentTab 刷新当前选中的标签页
@@ -171,4 +192,18 @@ func (ui *MainUI) PrevTab() {
 // GetContent 返回UI内容
 func (ui *MainUI) GetContent() fyne.CanvasObject {
 	return ui.InitializeUI()
+}
+
+// StopAllMonitoring 停止所有文件监控
+func (ui *MainUI) StopAllMonitoring() {
+	log.Println("停止所有文件监控")
+
+	// 遍历所有查看器并停止监控
+	for path, viewer := range ui.viewers {
+		log.Printf("停止对文件 %s 的监控", path)
+		viewer.StopMonitoring()
+	}
+
+	// 清空查看器映射
+	ui.viewers = make(map[string]*plantuml.Viewer)
 }
