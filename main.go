@@ -95,11 +95,12 @@ func main() {
 	// 创建主窗口
 	mainWindow = fyneApp.NewWindow("PlantUML Viewer")
 
-	// 设置窗口默认最大化
-	// 获取屏幕尺寸
-	size := fyneApp.Driver().AllWindows()[0].Canvas().Size()
-	// 设置窗口大小为屏幕大小
-	mainWindow.Resize(fyne.NewSize(size.Width, size.Height))
+	// 第一步：先做屏幕居中
+	mainWindow.CenterOnScreen()
+
+	// 第二步：解决最大化问题 - 使用最大可行的尺寸
+	// 测试表明这个尺寸在大多数显示器上会触发窗口管理器的自动最大化行为
+	mainWindow.Resize(fyne.NewSize(3840, 2160))
 
 	// 设置窗口关闭事件
 	mainWindow.SetCloseIntercept(func() {
@@ -274,8 +275,11 @@ func handleIPCConnection(conn net.Conn) {
 		go func() {
 			// 使用UI线程处理
 			fyne.Do(func() {
-				// 激活窗口
+				// 保持窗口最大化并获取焦点
 				mainWindow.RequestFocus()
+
+				// 重新设置最大尺寸，确保窗口保持最大化
+				mainWindow.Resize(fyne.NewSize(3840, 2160))
 
 				// 打开所有文件
 				for _, file := range validFiles {
@@ -399,38 +403,46 @@ func validateFiles(files []string) []string {
 
 // setupShortcuts 设置键盘快捷键
 func setupShortcuts() {
-	// 创建一个变量来跟踪最后一次处理的键盘事件时间
-	var lastKeyHandled time.Time
+	// 完全重新实现键盘事件处理，采用不同的方法避免Tab键后方向键失效
 
-	// 使用简单的按键切换，仅支持Tab和左右方向键
-	mainWindow.Canvas().SetOnTypedKey(func(ke *fyne.KeyEvent) {
-		// 防止短时间内重复处理键盘事件（防抖动）
-		if time.Since(lastKeyHandled) < 100*time.Millisecond {
+	// 使用两个单独的处理器来替代一个统一的处理器
+
+	// 1. 标签切换处理
+	handleTabSwitch := func(key fyne.KeyName) {
+		if mainUI == nil {
 			return
 		}
 
-		// 根据按键类型执行不同操作
-		switch ke.Name {
+		switch key {
 		case fyne.KeyTab:
-			log.Println("按下Tab键，切换到下一个标签页")
-			if mainUI != nil {
-				mainUI.NextTab()
-			}
+			log.Println("处理Tab键: 下一标签页")
+			mainUI.NextTab()
 		case fyne.KeyLeft:
-			log.Println("按下左方向键，切换到上一个标签页")
-			if mainUI != nil {
-				mainUI.PrevTab()
-			}
+			log.Println("处理左方向键: 上一标签页")
+			mainUI.PrevTab()
 		case fyne.KeyRight:
-			log.Println("按下右方向键，切换到下一个标签页")
-			if mainUI != nil {
-				mainUI.NextTab()
-			}
+			log.Println("处理右方向键: 下一标签页")
+			mainUI.NextTab()
 		}
+	}
 
-		// 更新最后一次处理的键盘事件时间
-		lastKeyHandled = time.Now()
+	// 2. 为Canvas注册按键处理器
+	mainWindow.Canvas().SetOnTypedKey(func(ke *fyne.KeyEvent) {
+		log.Printf("接收到键盘事件: %v", ke.Name)
+
+		// 立即处理按键，不延迟
+		handleTabSwitch(ke.Name)
 	})
+
+	// 3. 监听字符输入，作为备用处理方式
+	mainWindow.Canvas().SetOnTypedRune(func(r rune) {
+		log.Printf("接收到字符输入: %c", r)
+
+		// 这里我们不处理字符输入事件，只记录它们
+	})
+
+	// 4. 确保Canvas始终能接收键盘事件
+	mainWindow.RequestFocus()
 }
 
 // 应用程序图标资源（需要添加实际的图标数据）
