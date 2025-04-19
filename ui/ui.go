@@ -6,31 +6,24 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
 
 	"plantumlmacviewer/plantuml"
 )
 
 // MainUI 是应用程序的主UI结构
 type MainUI struct {
-	window        fyne.Window
-	files         []string
-	tabs          *container.DocTabs
-	statusBar     *widget.Label
-	tabCountLabel *widget.Label  // 显示当前标签页计数的标签
-	helpLabel     *widget.Label  // 显示帮助信息的标签
-	openedFiles   map[string]int // 用于跟踪已打开文件及其在tabs.Items中的索引
+	window      fyne.Window
+	files       []string
+	tabs        *container.DocTabs
+	openedFiles map[string]int // 用于跟踪已打开文件及其在tabs.Items中的索引
 }
 
 // NewMainUI 创建新的UI实例
 func NewMainUI(window fyne.Window, files []string) (*MainUI, error) {
 	ui := &MainUI{
-		window:        window,
-		files:         files,
-		statusBar:     widget.NewLabel("就绪"),
-		tabCountLabel: widget.NewLabel("标签页: 0/0"),
-		helpLabel:     widget.NewLabel("热键: Tab=下一页标签 PageUp=上一页标签 PageDown=下一页标签"),
-		openedFiles:   make(map[string]int),
+		window:      window,
+		files:       files,
+		openedFiles: make(map[string]int),
 	}
 	return ui, nil
 }
@@ -46,31 +39,8 @@ func (ui *MainUI) InitializeUI() fyne.CanvasObject {
 		ui.OpenFile(file)
 	}
 
-	// 创建顶部帮助栏
-	helpContainer := container.NewHBox(
-		ui.helpLabel,
-	)
-
-	// 创建底部状态栏
-	statusContainer := container.NewHBox(
-		widget.NewLabel("状态:"),
-		ui.statusBar,
-		widget.NewSeparator(),
-		ui.tabCountLabel,
-	)
-
-	// 创建主布局
-	mainLayout := container.NewBorder(
-		helpContainer,
-		statusContainer,
-		nil, nil,
-		ui.tabs,
-	)
-
-	// 更新标签页计数
-	ui.updateTabCount()
-
-	return mainLayout
+	// 直接返回tabs容器作为主布局
+	return ui.tabs
 }
 
 // OpenFile 打开文件并创建新标签页，如果文件已打开则切换到对应标签页
@@ -85,17 +55,12 @@ func (ui *MainUI) OpenFile(filePath string) {
 	if tabIndex, exists := ui.openedFiles[filePath]; exists {
 		// 文件已经打开，切换到对应标签
 		ui.tabs.SelectIndex(tabIndex)
-		ui.statusBar.SetText(fmt.Sprintf("已切换到: %s", filepath.Base(filePath)))
-		ui.updateTabCount() // 更新标签计数
 		return
 	}
-
-	ui.statusBar.SetText(fmt.Sprintf("正在打开: %s", filepath.Base(filePath)))
 
 	// 创建PlantUML查看器
 	viewer, err := plantuml.NewViewer(filePath)
 	if err != nil {
-		ui.statusBar.SetText(fmt.Sprintf("无法打开文件: %v", err))
 		return
 	}
 
@@ -115,13 +80,8 @@ func (ui *MainUI) OpenFile(filePath string) {
 	// 选择新标签
 	ui.tabs.SelectIndex(len(ui.tabs.Items) - 1)
 
-	ui.statusBar.SetText(fmt.Sprintf("已打开: %s", fileName))
-
 	// 更新窗口标题
 	ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", fileName))
-
-	// 更新标签页计数
-	ui.updateTabCount()
 
 	// 监听标签关闭事件，从openedFiles中移除
 	ui.tabs.OnClosed = func(item *container.TabItem) {
@@ -138,33 +98,11 @@ func (ui *MainUI) OpenFile(filePath string) {
 				break
 			}
 		}
-
-		// 更新标签页计数
-		ui.updateTabCount()
 	}
 
-	// 监听标签选择事件，更新窗口标题和标签计数
+	// 监听标签选择事件，更新窗口标题
 	ui.tabs.OnSelected = func(item *container.TabItem) {
 		ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", item.Text))
-		ui.updateTabCount()
-	}
-}
-
-// updateTabCount 更新标签页计数显示
-func (ui *MainUI) updateTabCount() {
-	if ui.tabs == nil {
-		ui.tabCountLabel.SetText("标签页: 0/0")
-		return
-	}
-
-	currentIndex := ui.tabs.SelectedIndex() + 1 // 人类友好的索引（从1开始）
-	totalTabs := len(ui.tabs.Items)
-
-	ui.tabCountLabel.SetText(fmt.Sprintf("标签页: %d/%d", currentIndex, totalTabs))
-
-	// 如果没有标签页，更新窗口标题
-	if totalTabs == 0 {
-		ui.window.SetTitle("PlantUML Viewer - 未加载文件")
 	}
 }
 
