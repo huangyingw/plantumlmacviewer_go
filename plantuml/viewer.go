@@ -71,16 +71,6 @@ func (v *Viewer) GetCanvas() fyne.CanvasObject {
 
 // renderPlantUML 渲染PlantUML图表
 func (v *Viewer) renderPlantUML() {
-	// 创建加载指示器
-	loadingLabel := widget.NewLabel("正在渲染...")
-	loadingLabel.Alignment = fyne.TextAlignCenter
-
-	// 在UI线程中更新界面
-	fyne.Do(func() {
-		v.container.Objects[0] = container.NewCenter(loadingLabel)
-		v.container.Refresh()
-	})
-
 	log.Printf("开始渲染文件: %s", v.filePath)
 
 	// 优先尝试使用!pragma处理图表 (不需要graphviz)
