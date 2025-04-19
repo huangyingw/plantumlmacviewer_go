@@ -55,6 +55,10 @@ func main() {
 		fmt.Println("\n选项:")
 		flag.PrintDefaults()
 		fmt.Println("\n支持的文件类型: .puml, .plantuml, .pu")
+		fmt.Println("\n快捷键:")
+		fmt.Println("  Tab 或 PageDown: 下一个标签页")
+		fmt.Println("  PageUp: 上一个标签页")
+		fmt.Println("  Alt+←/→: 上一个/下一个标签页 (某些系统上)")
 		os.Exit(0)
 	}
 
@@ -90,7 +94,12 @@ func main() {
 
 	// 创建主窗口
 	mainWindow = fyneApp.NewWindow("PlantUML Viewer")
-	mainWindow.Resize(fyne.NewSize(800, 600))
+
+	// 设置窗口默认最大化
+	// 获取屏幕尺寸
+	size := fyneApp.Driver().AllWindows()[0].Canvas().Size()
+	// 设置窗口大小为屏幕大小
+	mainWindow.Resize(fyne.NewSize(size.Width, size.Height))
 
 	// 设置窗口关闭事件
 	mainWindow.SetCloseIntercept(func() {
@@ -232,11 +241,19 @@ func handleIPCConnection(conn net.Conn) {
 	defer conn.Close()
 	log.Println("处理IPC连接...")
 
+	// 使用带超时的读取
+	err := conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err != nil {
+		log.Printf("设置读取超时失败: %v", err)
+	}
+
 	// 读取文件列表
 	buf := make([]byte, 4096)
 	n, err := conn.Read(buf)
 	if err != nil {
 		log.Printf("读取数据出错：%v", err)
+		// 尝试发送错误信息
+		conn.Write([]byte("ERROR: 读取数据失败"))
 		return
 	}
 
@@ -251,22 +268,47 @@ func handleIPCConnection(conn net.Conn) {
 
 	// 在UI线程中打开文件
 	if len(validFiles) > 0 {
-		fyne.Do(func() {
-			for _, file := range validFiles {
-				log.Printf("尝试打开文件: %s", file)
-				// 使用现有UI打开文件
-				if mainUI != nil {
-					mainUI.OpenFile(file)
+		// 使用通道来协调文件处理完成
+		done := make(chan bool, 1)
+
+		go func() {
+			// 使用UI线程处理
+			fyne.Do(func() {
+				// 激活窗口
+				mainWindow.RequestFocus()
+
+				// 打开所有文件
+				for _, file := range validFiles {
+					log.Printf("尝试打开文件: %s", file)
+					if mainUI != nil {
+						mainUI.OpenFile(file)
+					}
 				}
-			}
-			// 将窗口置于前台
-			mainWindow.Show()
-			log.Println("窗口已置于前台")
-		})
+
+				log.Println("所有文件已处理完成")
+				done <- true
+			})
+		}()
+
+		// 等待文件处理完成或超时
+		select {
+		case <-done:
+			log.Println("文件处理已完成")
+		case <-time.After(5 * time.Second):
+			log.Println("警告: 文件处理超时")
+		}
 	}
 
 	// 发送确认信息
-	conn.Write([]byte("OK"))
+	err = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	if err != nil {
+		log.Printf("设置写入超时失败: %v", err)
+	}
+
+	_, err = conn.Write([]byte("OK"))
+	if err != nil {
+		log.Printf("发送确认信息失败: %v", err)
+	}
 }
 
 // sendFilesToRunningInstance 将文件列表发送到正在运行的实例
@@ -277,8 +319,8 @@ func sendFilesToRunningInstance(files []string) {
 
 	log.Printf("发送文件列表到运行中的实例: %v", files)
 
-	// 连接到IPC服务器
-	conn, err := net.Dial("unix", ipcAddr)
+	// 连接到IPC服务器，添加超时
+	conn, err := net.DialTimeout("unix", ipcAddr, 3*time.Second)
 	if err != nil {
 		log.Printf("无法连接到运行中的实例：%v", err)
 		return
@@ -286,6 +328,12 @@ func sendFilesToRunningInstance(files []string) {
 	defer conn.Close()
 
 	log.Println("已连接到IPC服务器")
+
+	// 设置写入超时
+	err = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+	if err != nil {
+		log.Printf("设置写入超时失败: %v", err)
+	}
 
 	// 发送文件列表
 	fileList := strings.Join(files, "\n")
@@ -296,6 +344,12 @@ func sendFilesToRunningInstance(files []string) {
 	}
 
 	log.Println("文件列表已发送")
+
+	// 设置读取超时
+	err = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err != nil {
+		log.Printf("设置读取超时失败: %v", err)
+	}
 
 	// 等待确认
 	buf := make([]byte, 16)
@@ -345,30 +399,37 @@ func validateFiles(files []string) []string {
 
 // setupShortcuts 设置键盘快捷键
 func setupShortcuts() {
-	// 使用简单的按键切换，先支持基本功能
+	// 创建一个变量来跟踪最后一次处理的键盘事件时间
+	var lastKeyHandled time.Time
+
+	// 使用简单的按键切换，仅支持Tab和左右方向键
 	mainWindow.Canvas().SetOnTypedKey(func(ke *fyne.KeyEvent) {
-		if ke.Name == fyne.KeyTab {
+		// 防止短时间内重复处理键盘事件（防抖动）
+		if time.Since(lastKeyHandled) < 100*time.Millisecond {
+			return
+		}
+
+		// 根据按键类型执行不同操作
+		switch ke.Name {
+		case fyne.KeyTab:
 			log.Println("按下Tab键，切换到下一个标签页")
 			if mainUI != nil {
 				mainUI.NextTab()
 			}
-		}
-
-		// 为PageDown键绑定下一个标签页功能
-		if ke.Name == fyne.KeyPageDown {
-			log.Println("按下PageDown键，切换到下一个标签页")
+		case fyne.KeyLeft:
+			log.Println("按下左方向键，切换到上一个标签页")
+			if mainUI != nil {
+				mainUI.PrevTab()
+			}
+		case fyne.KeyRight:
+			log.Println("按下右方向键，切换到下一个标签页")
 			if mainUI != nil {
 				mainUI.NextTab()
 			}
 		}
 
-		// 为PageUp键绑定上一个标签页功能
-		if ke.Name == fyne.KeyPageUp {
-			log.Println("按下PageUp键，切换到上一个标签页")
-			if mainUI != nil {
-				mainUI.PrevTab()
-			}
-		}
+		// 更新最后一次处理的键盘事件时间
+		lastKeyHandled = time.Now()
 	})
 }
 
