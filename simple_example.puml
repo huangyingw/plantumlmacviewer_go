@@ -1,8 +1,6 @@
 @startuml
 !pragma layout smetana
 
-title "Simple PlantUML Viewer Demo"
-
 ' 定义几个简单的类
 class PlantUMLViewer {
   + main()
