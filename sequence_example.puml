@@ -1,8 +1,6 @@
 @startuml
 !pragma layout smetana
 
-title "序列图示例"
-
 actor 用户
 participant "PlantUML查看器" as App
 participant "渲染引擎" as Engine
