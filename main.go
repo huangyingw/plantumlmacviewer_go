@@ -95,12 +95,22 @@ func main() {
 	// 创建主窗口
 	mainWindow = fyneApp.NewWindow("PlantUML Viewer")
 
-	// 第一步：先做屏幕居中
+	// 设置窗口为最大化，而不是全屏
+	mainWindow.Resize(fyne.NewSize(3840, 2160)) // 设置较大的初始尺寸
+
+	// 居中显示窗口
 	mainWindow.CenterOnScreen()
 
-	// 第二步：解决最大化问题 - 使用最大可行的尺寸
-	// 测试表明这个尺寸在大多数显示器上会触发窗口管理器的自动最大化行为
-	mainWindow.Resize(fyne.NewSize(3840, 2160))
+	// 在窗口显示后确保处于最大化状态
+	go func() {
+		// 给界面一点时间显示出来
+		time.Sleep(100 * time.Millisecond)
+		fyne.Do(func() {
+			// 使用最大化，而不是全屏
+			mainWindow.SetFullScreen(false)             // 确保不是全屏
+			mainWindow.Resize(fyne.NewSize(3840, 2160)) // 再次设置较大尺寸以触发最大化
+		})
+	}()
 
 	// 设置窗口关闭事件
 	mainWindow.SetCloseIntercept(func() {
@@ -275,11 +285,8 @@ func handleIPCConnection(conn net.Conn) {
 		go func() {
 			// 使用UI线程处理
 			fyne.Do(func() {
-				// 保持窗口最大化并获取焦点
+				// 保持窗口获取焦点
 				mainWindow.RequestFocus()
-
-				// 重新设置最大尺寸，确保窗口保持最大化
-				mainWindow.Resize(fyne.NewSize(3840, 2160))
 
 				// 打开所有文件
 				for _, file := range validFiles {
@@ -403,46 +410,52 @@ func validateFiles(files []string) []string {
 
 // setupShortcuts 设置键盘快捷键
 func setupShortcuts() {
-	// 完全重新实现键盘事件处理，采用不同的方法避免Tab键后方向键失效
+	// 完全重新实现键盘事件处理，确保Tab键后方向键仍然有效
+	canvas := mainWindow.Canvas()
 
-	// 使用两个单独的处理器来替代一个统一的处理器
+	// 设置一个键盘事件处理函数
+	canvas.SetOnTypedKey(func(ke *fyne.KeyEvent) {
+		log.Printf("接收到键盘事件: %v", ke.Name)
 
-	// 1. 标签切换处理
-	handleTabSwitch := func(key fyne.KeyName) {
+		// 确保mainUI已初始化
 		if mainUI == nil {
 			return
 		}
 
-		switch key {
+		// 处理按键
+		switch ke.Name {
 		case fyne.KeyTab:
 			log.Println("处理Tab键: 下一标签页")
 			mainUI.NextTab()
+			// 立即请求焦点回到主窗口
+			mainWindow.RequestFocus()
 		case fyne.KeyLeft:
 			log.Println("处理左方向键: 上一标签页")
 			mainUI.PrevTab()
 		case fyne.KeyRight:
 			log.Println("处理右方向键: 下一标签页")
 			mainUI.NextTab()
+		case fyne.KeyEscape:
+			// ESC键退出全屏
+			if mainWindow.FullScreen() {
+				mainWindow.SetFullScreen(false)
+			}
 		}
-	}
-
-	// 2. 为Canvas注册按键处理器
-	mainWindow.Canvas().SetOnTypedKey(func(ke *fyne.KeyEvent) {
-		log.Printf("接收到键盘事件: %v", ke.Name)
-
-		// 立即处理按键，不延迟
-		handleTabSwitch(ke.Name)
 	})
 
-	// 3. 监听字符输入，作为备用处理方式
-	mainWindow.Canvas().SetOnTypedRune(func(r rune) {
-		log.Printf("接收到字符输入: %c", r)
-
-		// 这里我们不处理字符输入事件，只记录它们
+	// 设置窗口获取焦点事件
+	mainWindow.SetOnClosed(func() {
+		removeLockFile()
 	})
 
-	// 4. 确保Canvas始终能接收键盘事件
+	// 确保窗口始终获取焦点
 	mainWindow.RequestFocus()
+
+	// 修复Tab键后焦点问题 - 监听窗口获取焦点的事件
+	mainWindow.Canvas().SetOnTypedRune(func(r rune) {
+		// 在任何字符输入后重新请求焦点，这有助于保持键盘事件的响应
+		mainWindow.RequestFocus()
+	})
 }
 
 // 应用程序图标资源（需要添加实际的图标数据）
