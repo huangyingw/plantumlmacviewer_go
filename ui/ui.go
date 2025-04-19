@@ -44,9 +44,24 @@ func (ui *MainUI) InitializeUI() fyne.CanvasObject {
 
 	// 监听标签关闭事件，从OpenedFiles中移除并停止文件监控
 	ui.Tabs.OnClosed = func(item *container.TabItem) {
+		log.Printf("关闭标签页: %s", item.Text)
+
 		// 查找并移除关闭的文件
+		var closedPath string
+		var closedIndex int
+
 		for path, index := range ui.OpenedFiles {
-			if filepath.Base(path) == item.Text {
+			if index >= len(ui.Tabs.Items) {
+				// 索引已经超出范围，直接删除
+				log.Printf("删除无效的文件记录: %s, 索引: %d", path, index)
+				delete(ui.OpenedFiles, path)
+				continue
+			}
+
+			if filepath.Base(path) == item.Text || ui.Tabs.Items[index] == item {
+				closedPath = path
+				closedIndex = index
+
 				// 停止文件监控
 				if viewer, exists := ui.viewers[path]; exists {
 					log.Printf("停止对文件 %s 的监控", path)
@@ -54,14 +69,32 @@ func (ui *MainUI) InitializeUI() fyne.CanvasObject {
 					delete(ui.viewers, path)
 				}
 
-				delete(ui.OpenedFiles, path)
-				// 更新其他文件的索引
-				for otherPath, otherIndex := range ui.OpenedFiles {
-					if otherIndex > index {
-						ui.OpenedFiles[otherPath] = otherIndex - 1
-					}
-				}
 				break
+			}
+		}
+
+		// 如果找到了被关闭的标签对应的文件
+		if closedPath != "" {
+			log.Printf("从映射中删除文件: %s, 索引: %d", closedPath, closedIndex)
+			delete(ui.OpenedFiles, closedPath)
+
+			// 更新其他文件的索引
+			for otherPath, otherIndex := range ui.OpenedFiles {
+				if otherIndex > closedIndex {
+					ui.OpenedFiles[otherPath] = otherIndex - 1
+					log.Printf("更新文件索引: %s, 从 %d 到 %d", otherPath, otherIndex, otherIndex-1)
+				}
+			}
+		} else {
+			log.Printf("警告: 无法找到被关闭的标签对应的文件记录")
+			// 记录当前所有标签和文件映射的状态，用于调试
+			log.Printf("当前标签数量: %d", len(ui.Tabs.Items))
+			for i, tab := range ui.Tabs.Items {
+				log.Printf("标签[%d]: %s", i, tab.Text)
+			}
+			log.Printf("当前文件映射:")
+			for path, idx := range ui.OpenedFiles {
+				log.Printf("  %s -> %d", path, idx)
 			}
 		}
 	}
@@ -75,6 +108,26 @@ func (ui *MainUI) InitializeUI() fyne.CanvasObject {
 	return ui.Tabs
 }
 
+// truncateFileName 截断过长的文件名，确保标签页不会过长
+func truncateFileName(fileName string, maxLength int) string {
+	if len(fileName) <= maxLength {
+		return fileName
+	}
+
+	// 分离文件名和扩展名
+	ext := filepath.Ext(fileName)
+	baseName := fileName[:len(fileName)-len(ext)]
+
+	// 计算需要保留的字符数（考虑到要添加"..."）
+	keep := maxLength - 3 - len(ext)
+	if keep < 10 {
+		keep = 10 // 确保至少保留10个字符
+	}
+
+	// 返回截断后的文件名
+	return baseName[:keep] + "..." + ext
+}
+
 // OpenFile 打开文件并创建新标签页，如果文件已打开则切换到对应标签页
 func (ui *MainUI) OpenFile(filePath string) {
 	// 获取绝对路径
@@ -85,6 +138,16 @@ func (ui *MainUI) OpenFile(filePath string) {
 
 	// 检查文件是否已打开
 	if tabIndex, exists := ui.OpenedFiles[filePath]; exists {
+		// 文件已经打开，检查索引是否有效
+		if tabIndex < 0 || tabIndex >= len(ui.Tabs.Items) {
+			log.Printf("警告: 文件 %s 的标签索引 %d 无效，当前标签数量: %d", filePath, tabIndex, len(ui.Tabs.Items))
+			// 从OpenedFiles中删除无效的记录
+			delete(ui.OpenedFiles, filePath)
+			// 重新打开文件
+			ui.OpenFile(filePath)
+			return
+		}
+
 		// 文件已经打开，切换到对应标签
 		ui.Tabs.SelectIndex(tabIndex)
 
@@ -100,6 +163,18 @@ func (ui *MainUI) OpenFile(filePath string) {
 		// 重新创建PlantUML查看器
 		newViewer, err := plantuml.NewViewer(filePath)
 		if err == nil {
+			// 设置文件变化回调，自动切换到这个标签页
+			newViewer.SetOnFileChanged(func() {
+				// 获取当前的索引，而不是使用闭包中的tabIndex
+				currentIndex, exists := ui.OpenedFiles[filePath]
+				if exists && currentIndex >= 0 && currentIndex < len(ui.Tabs.Items) {
+					log.Printf("检测到文件变化，切换到标签页: %s", filepath.Base(filePath))
+					ui.Tabs.SelectIndex(currentIndex)
+				} else {
+					log.Printf("检测到文件变化，但标签索引无效: %d，当前标签数量: %d", currentIndex, len(ui.Tabs.Items))
+				}
+			})
+
 			// 存储新的查看器引用
 			ui.viewers[filePath] = newViewer
 
@@ -120,17 +195,31 @@ func (ui *MainUI) OpenFile(filePath string) {
 		return
 	}
 
+	// 设置文件变化回调，自动切换到这个标签页
+	viewer.SetOnFileChanged(func() {
+		// 获取当前的索引，而不是使用预计算的索引
+		currentIndex, exists := ui.OpenedFiles[filePath]
+		if exists && currentIndex >= 0 && currentIndex < len(ui.Tabs.Items) {
+			log.Printf("检测到文件变化，切换到标签页: %s", filepath.Base(filePath))
+			ui.Tabs.SelectIndex(currentIndex)
+		} else {
+			log.Printf("检测到文件变化，但标签索引无效: %d，当前标签数量: %d", currentIndex, len(ui.Tabs.Items))
+		}
+	})
+
 	// 存储查看器引用
 	ui.viewers[filePath] = viewer
 
 	// 创建标签项
 	fileName := filepath.Base(filePath)
+	// 截断过长的文件名
+	displayName := truncateFileName(fileName, 30) // 最多显示30个字符
 
 	// 创建标签内容
 	content := container.NewScroll(viewer.GetCanvas())
 
 	// 添加新标签
-	tab := container.NewTabItem(fileName, content)
+	tab := container.NewTabItem(displayName, content)
 	ui.Tabs.Append(tab)
 
 	// 记录文件路径和对应的tab索引
@@ -206,4 +295,19 @@ func (ui *MainUI) StopAllMonitoring() {
 
 	// 清空查看器映射
 	ui.viewers = make(map[string]*plantuml.Viewer)
+}
+
+// CloseCurrentTab 关闭当前选中的标签页
+func (ui *MainUI) CloseCurrentTab() {
+	if ui.Tabs == nil || len(ui.Tabs.Items) == 0 {
+		return
+	}
+
+	currentIndex := ui.Tabs.SelectedIndex()
+	if currentIndex < 0 || currentIndex >= len(ui.Tabs.Items) {
+		return
+	}
+
+	// 让标签容器处理关闭逻辑（会触发OnClosed回调）
+	ui.Tabs.RemoveIndex(currentIndex)
 }
