@@ -48,8 +48,14 @@ func NewViewer(filePath string) (*Viewer, error) {
 	// 初始化UI组件
 	viewer.initComponents()
 
-	// 尝试渲染PlantUML
-	go viewer.renderPlantUML()
+	// 立即渲染PlantUML，而不是异步进行
+	// 这确保在视图显示时，图像已经准备好
+	err = viewer.renderSynchronously()
+	if err != nil {
+		log.Printf("同步渲染失败: %v，尝试异步渲染...", err)
+		// 如果同步渲染失败，则使用异步方式作为备选方案
+		go viewer.renderPlantUML()
+	}
 
 	return viewer, nil
 }
@@ -58,7 +64,8 @@ func NewViewer(filePath string) (*Viewer, error) {
 func (v *Viewer) initComponents() {
 	// 创建用于显示渲染图像的组件
 	v.imageView = &canvas.Image{}
-	v.imageView.FillMode = canvas.ImageFillContain // 内容适应屏幕
+	v.imageView.FillMode = canvas.ImageFillContain   // 内容适应屏幕
+	v.imageView.ScaleMode = canvas.ImageScaleFastest // 使用最快的缩放模式，提高性能
 
 	// 创建容器
 	v.container = container.NewMax(container.NewScroll(v.imageView))
@@ -72,6 +79,16 @@ func (v *Viewer) GetCanvas() fyne.CanvasObject {
 // renderPlantUML 渲染PlantUML图表
 func (v *Viewer) renderPlantUML() {
 	log.Printf("开始渲染文件: %s", v.filePath)
+
+	// 重新读取文件内容，确保获取最新的内容
+	content, err := ioutil.ReadFile(v.filePath)
+	if err == nil {
+		// 只有成功读取时才更新内容
+		v.content = string(content)
+		log.Printf("已重新读取文件内容，大小: %d 字节", len(content))
+	} else {
+		log.Printf("警告：无法重新读取文件内容: %v，使用缓存的内容", err)
+	}
 
 	// 优先尝试使用!pragma处理图表 (不需要graphviz)
 	contentWithPragma := v.addPragmaIfNeeded(v.content)
@@ -102,21 +119,44 @@ func (v *Viewer) renderPlantUML() {
 
 // addPragmaIfNeeded 添加!pragma指令以避免需要graphviz
 func (v *Viewer) addPragmaIfNeeded(content string) string {
+	// 获取文件名，用于title
+	fileName := filepath.Base(v.filePath)
+
 	// 如果内容中没有!pragma
 	if !strings.Contains(content, "!pragma") {
 		// 查找@startuml行
 		lines := strings.Split(content, "\n")
 		for i, line := range lines {
 			if strings.HasPrefix(strings.TrimSpace(line), "@startuml") {
-				// 在@startuml后添加!pragma行
-				lines = append(lines[:i+1], append([]string{"!pragma layout smetana"}, lines[i+1:]...)...)
+				// 在@startuml后添加!pragma行和title
+				titleLine := fmt.Sprintf("title %s", fileName)
+				lines = append(lines[:i+1], append([]string{"!pragma layout smetana", titleLine}, lines[i+1:]...)...)
 				return strings.Join(lines, "\n")
 			}
 		}
 
 		// 如果没有找到@startuml行，则在开头添加
 		if strings.TrimSpace(content) != "" {
-			return "@startuml\n!pragma layout smetana\n" + content + "\n@enduml"
+			return fmt.Sprintf("@startuml\n!pragma layout smetana\ntitle %s\n%s\n@enduml", fileName, content)
+		}
+	} else if !strings.Contains(content, "title ") {
+		// 如果已经有pragma但没有title，添加title
+		lines := strings.Split(content, "\n")
+		for i, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "@startuml") ||
+				strings.HasPrefix(strings.TrimSpace(line), "!pragma") {
+				// 找到适合插入title的位置
+				insertPos := i + 1
+				// 如果下一行是!pragma，移到pragma后面
+				if i+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i+1]), "!pragma") {
+					insertPos = i + 2
+				}
+
+				// 插入title行
+				titleLine := fmt.Sprintf("title %s", fileName)
+				lines = append(lines[:insertPos], append([]string{titleLine}, lines[insertPos:]...)...)
+				return strings.Join(lines, "\n")
+			}
 		}
 	}
 
@@ -144,9 +184,13 @@ func (v *Viewer) renderUsingCommandLine(content string) (fyne.Resource, error) {
 	// 注意：plantuml命令默认会在相同目录下生成PNG文件，输出路径是tempFile+".png"
 	outputPath := tempFile + ".png"
 
-	// 执行plantuml命令
-	log.Printf("执行命令: plantuml -tpng %s", tempFile)
-	cmd := exec.Command("plantuml", "-tpng", tempFile)
+	// 基于图表内容自动确定合适的DPI值
+	dpi := v.calculateOptimalDPI(content)
+	log.Printf("自动计算得到的最佳DPI值: %d", dpi)
+
+	// 执行plantuml命令，使用动态计算的DPI值
+	log.Printf("执行命令: plantuml -tpng -Sdpi=%d %s", dpi, tempFile)
+	cmd := exec.Command("plantuml", "-tpng", fmt.Sprintf("-Sdpi=%d", dpi), tempFile)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	var stdout bytes.Buffer
@@ -231,6 +275,10 @@ func (v *Viewer) renderUsingJar(content string) (fyne.Resource, error) {
 		return nil, fmt.Errorf("Java未安装或不可用: %v", err)
 	}
 
+	// 基于图表内容自动确定合适的DPI值
+	dpi := v.calculateOptimalDPI(content)
+	log.Printf("自动计算得到的最佳DPI值: %d", dpi)
+
 	// 查找可能的plantuml.jar路径
 	jarPaths := []string{
 		"/usr/local/bin/plantuml.jar",
@@ -266,7 +314,7 @@ func (v *Viewer) renderUsingJar(content string) (fyne.Resource, error) {
 		// 如果找不到JAR文件，尝试使用命令行工具
 		if _, err := exec.LookPath("plantuml"); err == nil {
 			log.Printf("找到PlantUML命令行工具，尝试使用它")
-			cmd := exec.Command("plantuml", "-tpng", tempFile, "-o", tempDir)
+			cmd := exec.Command("plantuml", "-tpng", fmt.Sprintf("-Sdpi=%d", dpi), tempFile, "-o", tempDir)
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
 
@@ -280,9 +328,9 @@ func (v *Viewer) renderUsingJar(content string) (fyne.Resource, error) {
 			return nil, fmt.Errorf("找不到plantuml.jar或命令行工具，请确保已安装PlantUML")
 		}
 	} else {
-		// 执行plantuml.jar来生成图像
-		log.Printf("执行命令: java -jar %s -tpng %s -o %s", jarPath, tempFile, tempDir)
-		cmd := exec.Command("java", "-jar", jarPath, "-tpng", tempFile, "-o", tempDir)
+		// 执行plantuml.jar来生成图像，使用动态计算的DPI值
+		log.Printf("执行命令: java -jar %s -tpng -Sdpi=%d %s -o %s", jarPath, dpi, tempFile, tempDir)
+		cmd := exec.Command("java", "-jar", jarPath, "-tpng", fmt.Sprintf("-Sdpi=%d", dpi), tempFile, "-o", tempDir)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		var stdout bytes.Buffer
@@ -345,4 +393,106 @@ func (v *Viewer) showRenderError(message string) {
 		v.container.Objects[0] = container.NewCenter(errorContainer)
 		v.container.Refresh()
 	})
+}
+
+// renderSynchronously 同步渲染PlantUML图表
+func (v *Viewer) renderSynchronously() error {
+	log.Printf("开始同步渲染文件: %s", v.filePath)
+
+	// 重新读取文件内容，确保获取最新的内容
+	content, err := ioutil.ReadFile(v.filePath)
+	if err == nil {
+		// 只有成功读取时才更新内容
+		v.content = string(content)
+		log.Printf("已重新读取文件内容，大小: %d 字节", len(content))
+	} else {
+		log.Printf("警告：无法重新读取文件内容: %v，使用缓存的内容", err)
+	}
+
+	// 优先尝试使用!pragma处理图表 (不需要graphviz)
+	contentWithPragma := v.addPragmaIfNeeded(v.content)
+
+	// 先尝试使用命令行工具
+	img, err := v.renderUsingCommandLine(contentWithPragma)
+	if err != nil {
+		log.Printf("使用命令行工具渲染失败: %v，尝试使用JAR...", err)
+		// 如果命令行工具失败，尝试使用JAR
+		img, err = v.renderUsingJar(contentWithPragma)
+		if err != nil {
+			log.Printf("使用JAR渲染也失败: %v", err)
+			v.showRenderError(fmt.Sprintf("无法渲染PlantUML图表: %v", err))
+			return err
+		}
+	}
+
+	// 渲染成功，更新UI
+	v.imageView.Resource = img
+	v.container.Objects[0] = container.NewScroll(v.imageView)
+	v.container.Refresh()
+	v.rendered = true
+
+	log.Printf("成功同步渲染文件: %s", v.filePath)
+	return nil
+}
+
+// calculateOptimalDPI 计算最佳DPI值
+func (v *Viewer) calculateOptimalDPI(content string) int {
+	// 分析图表的复杂度来确定适合的DPI值
+	lines := strings.Split(content, "\n")
+
+	// 计算有效内容行数（非空行、非注释行）
+	contentLines := 0
+	classes := 0
+	relationships := 0
+
+	for _, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		if trimmedLine == "" || strings.HasPrefix(trimmedLine, "'") ||
+			strings.HasPrefix(trimmedLine, "!") || strings.HasPrefix(trimmedLine, "@") ||
+			strings.HasPrefix(trimmedLine, "title") {
+			continue // 跳过空行、注释行、标记行
+		}
+
+		contentLines++
+
+		// 检测类定义（如class、interface、enum等）
+		if strings.HasPrefix(trimmedLine, "class ") ||
+			strings.HasPrefix(trimmedLine, "interface ") ||
+			strings.HasPrefix(trimmedLine, "enum ") ||
+			strings.HasPrefix(trimmedLine, "entity ") {
+			classes++
+		}
+
+		// 检测关系（如继承、组合、聚合等）
+		if strings.Contains(trimmedLine, "-->") ||
+			strings.Contains(trimmedLine, "<--") ||
+			strings.Contains(trimmedLine, "->") ||
+			strings.Contains(trimmedLine, "<-") ||
+			strings.Contains(trimmedLine, "--") ||
+			strings.Contains(trimmedLine, "..") {
+			relationships++
+		}
+	}
+
+	// 基于内容复杂度计算DPI
+	// 简单图表使用较低的DPI（清晰但不占用太多空间）
+	// 复杂图表使用较高的DPI（确保细节清晰可见）
+
+	// 基本DPI值
+	baseDPI := 72
+
+	// 根据内容复杂度调整DPI
+	if classes > 10 || relationships > 15 || contentLines > 50 {
+		// 非常复杂的图表
+		return baseDPI + 48 // 120
+	} else if classes > 5 || relationships > 8 || contentLines > 30 {
+		// 较复杂的图表
+		return baseDPI + 24 // 96
+	} else if classes > 2 || relationships > 4 || contentLines > 15 {
+		// 中等复杂度的图表
+		return baseDPI + 12 // 84
+	}
+
+	// 简单图表使用基本DPI
+	return baseDPI // 72
 }
