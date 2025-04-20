@@ -100,26 +100,16 @@ func main() {
 	// 创建主窗口
 	mainWindow = fyneApp.NewWindow("PlantUML Viewer")
 
-	// 获取屏幕尺寸
-	primaryMonitor := mainWindow.Canvas().Size()
-	// 使用屏幕尺寸的80%作为窗口尺寸，确保不会超出屏幕边界
-	initialWidth := primaryMonitor.Width * 0.8
-	initialHeight := primaryMonitor.Height * 0.8
-	mainWindow.Resize(fyne.NewSize(initialWidth, initialHeight))
+	// 设置窗口标题
+	if len(validFiles) == 0 {
+		log.Println("没有指定要打开的文件，请通过命令行参数提供PUML文件路径")
+		mainWindow.SetTitle("PlantUML Viewer - 未加载文件")
+	} else {
+		mainWindow.SetTitle("PlantUML Viewer - 正在加载...")
+	}
 
 	// 居中显示窗口
 	mainWindow.CenterOnScreen()
-
-	// 在窗口显示后确保处于最大化状态
-	go func() {
-		// 给界面一点时间显示出来
-		time.Sleep(100 * time.Millisecond)
-		fyne.Do(func() {
-			// 使用最大化，而不是全屏
-			mainWindow.SetFullScreen(false)                              // 确保不是全屏
-			mainWindow.Resize(fyne.NewSize(initialWidth, initialHeight)) // 再次设置尺寸以确保适应
-		})
-	}()
 
 	// 设置窗口关闭事件
 	mainWindow.SetCloseIntercept(func() {
@@ -133,12 +123,6 @@ func main() {
 		mainWindow.Close()
 	})
 
-	// 如果没有文件参数，显示提示信息
-	if len(validFiles) == 0 {
-		log.Println("没有指定要打开的文件，请通过命令行参数提供PUML文件路径")
-		mainWindow.SetTitle("PlantUML Viewer - 未加载文件")
-	}
-
 	// 初始化UI并设置到窗口
 	mainUI, _ = ui.NewMainUI(mainWindow, validFiles)
 	content := mainUI.GetContent()
@@ -147,8 +131,46 @@ func main() {
 	// 添加键盘快捷键
 	setupShortcuts()
 
-	// 显示窗口并运行应用
-	mainWindow.ShowAndRun()
+	// 设置窗口为主窗口
+	mainWindow.SetMaster()
+
+	// 显示窗口
+	log.Println("显示窗口")
+	mainWindow.Show()
+
+	// 设置窗口为全屏模式
+	log.Println("设置窗口为全屏模式")
+	mainWindow.SetFullScreen(true)
+
+	// 使用goroutine在窗口显示全屏模式后显示提示
+	go func() {
+		// 延迟一秒，确保全屏模式已经完全生效
+		time.Sleep(1 * time.Second)
+		fyne.Do(func() {
+			// 临时显示提示信息
+			if mainUI != nil {
+				// 使用临时状态提示
+				mainWindow.SetTitle("PlantUML Viewer - 按ESC或F11可退出全屏模式")
+
+				// 5秒后恢复原标题
+				go func() {
+					time.Sleep(5 * time.Second)
+					fyne.Do(func() {
+						if len(mainUI.Tabs.Items) > 0 {
+							fileName := mainUI.Tabs.Items[mainUI.Tabs.SelectedIndex()].Text
+							mainWindow.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", fileName))
+						} else {
+							mainWindow.SetTitle("PlantUML Viewer - 未加载文件")
+						}
+					})
+				}()
+			}
+		})
+	}()
+
+	// 运行应用程序
+	log.Println("开始运行应用")
+	fyneApp.Run()
 }
 
 // setupLogger 配置日志输出到文件
@@ -494,6 +516,47 @@ func setupShortcuts() {
 			// ESC键退出全屏
 			if mainWindow.FullScreen() {
 				mainWindow.SetFullScreen(false)
+			}
+		case fyne.KeyF11:
+			// F11切换全屏模式
+			log.Println("处理F11键: 切换全屏模式")
+			currentFullScreen := mainWindow.FullScreen()
+			mainWindow.SetFullScreen(!currentFullScreen)
+
+			// 如果退出全屏模式，尝试恢复到最大化尺寸
+			if currentFullScreen {
+				// 给UI一点时间更新
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					fyne.Do(func() {
+						// 获取当前Canvas尺寸
+						canvasSize := mainWindow.Canvas().Size()
+						// 调整为接近最大尺寸
+						mainWindow.Resize(fyne.NewSize(canvasSize.Width*0.99, canvasSize.Height*0.99))
+					})
+				}()
+			}
+		case fyne.KeyF10:
+			// F10进入窗口最大化模式（非全屏）
+			log.Println("处理F10键: 最大化窗口")
+
+			// 确保不是全屏模式
+			if mainWindow.FullScreen() {
+				mainWindow.SetFullScreen(false)
+			}
+
+			// 获取当前Canvas尺寸
+			canvasSize := mainWindow.Canvas().Size()
+			if canvasSize.Width > 100 {
+				// 获取到有效尺寸，设置为接近最大尺寸（不是完全最大，避免遮挡系统UI）
+				effectiveWidth := canvasSize.Width * 0.95
+				effectiveHeight := canvasSize.Height * 0.95
+				log.Printf("设置窗口尺寸为: %.2f x %.2f", effectiveWidth, effectiveHeight)
+				mainWindow.Resize(fyne.NewSize(effectiveWidth, effectiveHeight))
+			} else {
+				// 使用固定大尺寸
+				log.Println("使用默认大尺寸 1200x800")
+				mainWindow.Resize(fyne.NewSize(1200, 800))
 			}
 		}
 	})
