@@ -1,0 +1,3 @@
+[deploy]
+	host = localhost
+	path = ~/Dropbox/loadrc/plantumlmacviewer_go
