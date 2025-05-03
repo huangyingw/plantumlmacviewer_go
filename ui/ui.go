@@ -285,14 +285,11 @@ func (ui *MainUI) GetContent() fyne.CanvasObject {
 
 // StopAllMonitoring 停止所有文件监控
 func (ui *MainUI) StopAllMonitoring() {
-	log.Println("停止所有文件监控")
-
-	// 遍历所有查看器并停止监控
+	log.Println("停止所有文件监控...")
 	for path, viewer := range ui.viewers {
 		log.Printf("停止对文件 %s 的监控", path)
 		viewer.StopMonitoring()
 	}
-
 	// 清空查看器映射
 	ui.viewers = make(map[string]*plantuml.Viewer)
 }
