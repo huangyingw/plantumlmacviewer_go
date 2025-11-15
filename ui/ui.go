@@ -101,7 +101,25 @@ func (ui *MainUI) InitializeUI() fyne.CanvasObject {
 
 	// 监听标签选择事件，更新窗口标题
 	ui.Tabs.OnSelected = func(item *container.TabItem) {
-		ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", item.Text))
+		// 获取当前选中的标签索引
+		selectedIndex := ui.Tabs.SelectedIndex()
+
+		// 从 OpenedFiles 映射中找到对应的完整文件路径
+		var fullFileName string
+		for path, index := range ui.OpenedFiles {
+			if index == selectedIndex {
+				// 找到了对应的文件路径，提取完整文件名
+				fullFileName = filepath.Base(path)
+				break
+			}
+		}
+
+		// 如果找到了完整文件名，使用它；否则使用标签文本（fallback）
+		if fullFileName != "" {
+			ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", fullFileName))
+		} else {
+			ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", item.Text))
+		}
 	}
 
 	// 直接返回tabs容器作为主布局
