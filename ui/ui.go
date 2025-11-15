@@ -128,8 +128,27 @@ func truncateFileName(fileName string, maxLength int) string {
 	return baseName[:keep] + "..." + ext
 }
 
+// createFileChangeCallback 创建文件变化回调函数
+// 当检测到文件变化时，自动切换到对应的标签页
+func (ui *MainUI) createFileChangeCallback(filePath string) func() {
+	return func() {
+		currentIndex, exists := ui.OpenedFiles[filePath]
+		if exists && currentIndex >= 0 && currentIndex < len(ui.Tabs.Items) {
+			log.Printf("检测到文件变化，切换到标签页: %s", filepath.Base(filePath))
+			ui.Tabs.SelectIndex(currentIndex)
+		} else {
+			log.Printf("检测到文件变化，但标签索引无效: %d，当前标签数量: %d", currentIndex, len(ui.Tabs.Items))
+		}
+	}
+}
+
 // OpenFile 打开文件并创建新标签页，如果文件已打开则切换到对应标签页
 func (ui *MainUI) OpenFile(filePath string) {
+	ui.OpenFileWithOptions(filePath, true)
+}
+
+// OpenFileWithOptions 打开文件并创建新标签页，可选是否自动选择标签
+func (ui *MainUI) OpenFileWithOptions(filePath string, selectTab bool) {
 	// 获取绝对路径
 	absPath, err := filepath.Abs(filePath)
 	if err == nil {
@@ -144,12 +163,14 @@ func (ui *MainUI) OpenFile(filePath string) {
 			// 从OpenedFiles中删除无效的记录
 			delete(ui.OpenedFiles, filePath)
 			// 重新打开文件
-			ui.OpenFile(filePath)
+			ui.OpenFileWithOptions(filePath, selectTab)
 			return
 		}
 
-		// 文件已经打开，切换到对应标签
-		ui.Tabs.SelectIndex(tabIndex)
+		// 文件已经打开，如果需要则切换到对应标签
+		if selectTab {
+			ui.Tabs.SelectIndex(tabIndex)
+		}
 
 		// 立即刷新当前标签内容，确保显示最新内容
 		log.Printf("正在刷新已打开的文件: %s", filePath)
@@ -164,16 +185,7 @@ func (ui *MainUI) OpenFile(filePath string) {
 		newViewer, err := plantuml.NewViewer(filePath)
 		if err == nil {
 			// 设置文件变化回调，自动切换到这个标签页
-			newViewer.SetOnFileChanged(func() {
-				// 获取当前的索引，而不是使用闭包中的tabIndex
-				currentIndex, exists := ui.OpenedFiles[filePath]
-				if exists && currentIndex >= 0 && currentIndex < len(ui.Tabs.Items) {
-					log.Printf("检测到文件变化，切换到标签页: %s", filepath.Base(filePath))
-					ui.Tabs.SelectIndex(currentIndex)
-				} else {
-					log.Printf("检测到文件变化，但标签索引无效: %d，当前标签数量: %d", currentIndex, len(ui.Tabs.Items))
-				}
-			})
+			newViewer.SetOnFileChanged(ui.createFileChangeCallback(filePath))
 
 			// 存储新的查看器引用
 			ui.viewers[filePath] = newViewer
@@ -196,16 +208,7 @@ func (ui *MainUI) OpenFile(filePath string) {
 	}
 
 	// 设置文件变化回调，自动切换到这个标签页
-	viewer.SetOnFileChanged(func() {
-		// 获取当前的索引，而不是使用预计算的索引
-		currentIndex, exists := ui.OpenedFiles[filePath]
-		if exists && currentIndex >= 0 && currentIndex < len(ui.Tabs.Items) {
-			log.Printf("检测到文件变化，切换到标签页: %s", filepath.Base(filePath))
-			ui.Tabs.SelectIndex(currentIndex)
-		} else {
-			log.Printf("检测到文件变化，但标签索引无效: %d，当前标签数量: %d", currentIndex, len(ui.Tabs.Items))
-		}
-	})
+	viewer.SetOnFileChanged(ui.createFileChangeCallback(filePath))
 
 	// 存储查看器引用
 	ui.viewers[filePath] = viewer
@@ -225,11 +228,11 @@ func (ui *MainUI) OpenFile(filePath string) {
 	// 记录文件路径和对应的tab索引
 	ui.OpenedFiles[filePath] = len(ui.Tabs.Items) - 1
 
-	// 选择新标签
-	ui.Tabs.SelectIndex(len(ui.Tabs.Items) - 1)
-
-	// 更新窗口标题
-	ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", fileName))
+	// 如果需要，选择新标签并更新窗口标题
+	if selectTab {
+		ui.Tabs.SelectIndex(len(ui.Tabs.Items) - 1)
+		ui.window.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", fileName))
+	}
 }
 
 // RefreshCurrentTab 刷新当前选中的标签页

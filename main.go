@@ -24,16 +24,29 @@ var (
 	version = "0.1.0"
 )
 
+// 常量定义
+const (
+	// 单实例锁文件路径
+	lockFile = "/tmp/plantumlviewer.lock"
+	// IPC服务器地址
+	ipcAddr = "/tmp/plantumlviewer.sock"
+
+	// 窗口初始尺寸（使用超大值，系统会自动调整到屏幕可用空间）
+	initialWindowWidth  = 6000
+	initialWindowHeight = 4000
+
+	// UI 初始化等待相关
+	mainUIInitMaxRetries    = 50                      // 最多重试 50 次（总计 5 秒）
+	mainUIInitRetryInterval = 100 * time.Millisecond  // 每次重试间隔 100ms
+
+	// 标签选择延迟（等待所有标签添加完成）
+	tabSelectionDelay = 100 * time.Millisecond
+)
+
 // 全局变量来存储应用程序实例
 var fyneApp fyne.App
 var mainWindow fyne.Window
 var mainUI *ui.MainUI
-
-// 单实例锁文件路径
-const lockFile = "/tmp/plantumlviewer.lock"
-
-// IPC服务器地址
-const ipcAddr = "/tmp/plantumlviewer.sock"
 
 // 全局变量保存锁文件句柄
 var lockFileHandle *os.File
@@ -108,9 +121,6 @@ func main() {
 		mainWindow.SetTitle("PlantUML Viewer - 正在加载...")
 	}
 
-	// 居中显示窗口
-	mainWindow.CenterOnScreen()
-
 	// 设置窗口关闭事件
 	mainWindow.SetCloseIntercept(func() {
 		// 关闭窗口时，停止所有文件监控
@@ -134,39 +144,17 @@ func main() {
 	// 设置窗口为主窗口
 	mainWindow.SetMaster()
 
+	// 设置一个非常大的窗口尺寸，系统会自动限制到屏幕最大可用空间
+	// 使用超大值（6K+ 分辨率），macOS会自动调整到屏幕可用大小（扣除菜单栏等）
+	log.Printf("设置窗口大小为 %dx%d（自动适配屏幕最大可用空间）", initialWindowWidth, initialWindowHeight)
+	mainWindow.Resize(fyne.NewSize(initialWindowWidth, initialWindowHeight))
+
 	// 显示窗口
 	log.Println("显示窗口")
 	mainWindow.Show()
 
-	// 设置窗口为全屏模式
-	log.Println("设置窗口为全屏模式")
-	mainWindow.SetFullScreen(true)
-
-	// 使用goroutine在窗口显示全屏模式后显示提示
-	go func() {
-		// 延迟一秒，确保全屏模式已经完全生效
-		time.Sleep(1 * time.Second)
-		fyne.Do(func() {
-			// 临时显示提示信息
-			if mainUI != nil {
-				// 使用临时状态提示
-				mainWindow.SetTitle("PlantUML Viewer - 按ESC或F11可退出全屏模式")
-
-				// 5秒后恢复原标题
-				go func() {
-					time.Sleep(5 * time.Second)
-					fyne.Do(func() {
-						if len(mainUI.Tabs.Items) > 0 {
-							fileName := mainUI.Tabs.Items[mainUI.Tabs.SelectedIndex()].Text
-							mainWindow.SetTitle(fmt.Sprintf("PlantUML Viewer - %s", fileName))
-						} else {
-							mainWindow.SetTitle("PlantUML Viewer - 未加载文件")
-						}
-					})
-				}()
-			}
-		})
-	}()
+	// 居中显示
+	mainWindow.CenterOnScreen()
 
 	// 运行应用程序
 	log.Println("开始运行应用")
@@ -315,7 +303,39 @@ func startIPCServer() {
 	}
 }
 
+// openFilesAndSelectLast 打开文件列表并选择最后一个标签
+// 这个函数封装了重复的文件打开和标签选择逻辑
+func openFilesAndSelectLast(files []string) {
+	fyne.Do(func() {
+		// 打开所有文件，不自动选择标签（避免触发 RequestFocus）
+		for _, file := range files {
+			log.Printf("尝试打开文件: %s", file)
+			mainUI.OpenFileWithOptions(file, false)
+		}
+
+		log.Println("所有文件已处理完成")
+
+		// 在所有文件打开后，选择最后一个文件的标签（在新的 fyne.Do 上下文中）
+		if len(files) > 0 {
+			go func() {
+				// 延迟一小段时间，确保所有标签都已添加
+				time.Sleep(tabSelectionDelay)
+				fyne.Do(func() {
+					// 在 fyne.Do 内部安全地访问 mainUI.Tabs
+					if mainUI.Tabs != nil && len(mainUI.Tabs.Items) > 0 {
+						lastIndex := len(mainUI.Tabs.Items) - 1
+						mainUI.Tabs.SelectIndex(lastIndex)
+						log.Printf("已选择最后一个标签，索引: %d", lastIndex)
+					}
+				})
+			}()
+		}
+	})
+}
+
 // handleIPCConnection 处理IPC连接
+// 从客户端接收文件列表，验证文件，然后在UI中打开这些文件
+// 注意：此函数在 goroutine 中运行，需要使用 fyne.Do() 来操作UI
 func handleIPCConnection(conn net.Conn) {
 	defer conn.Close()
 	log.Println("处理IPC连接...")
@@ -345,40 +365,7 @@ func handleIPCConnection(conn net.Conn) {
 	validFiles := validateFiles(fileList)
 	log.Printf("有效文件列表: %v", validFiles)
 
-	// 在UI线程中打开文件
-	if len(validFiles) > 0 {
-		// 使用通道来协调文件处理完成
-		done := make(chan bool, 1)
-
-		go func() {
-			// 使用UI线程处理
-			fyne.Do(func() {
-				// 保持窗口获取焦点
-				mainWindow.RequestFocus()
-
-				// 打开所有文件
-				for _, file := range validFiles {
-					log.Printf("尝试打开文件: %s", file)
-					if mainUI != nil {
-						mainUI.OpenFile(file)
-					}
-				}
-
-				log.Println("所有文件已处理完成")
-				done <- true
-			})
-		}()
-
-		// 等待文件处理完成或超时
-		select {
-		case <-done:
-			log.Println("文件处理已完成")
-		case <-time.After(5 * time.Second):
-			log.Println("警告: 文件处理超时")
-		}
-	}
-
-	// 发送确认信息
+	// 发送确认信息（先发送，避免客户端超时）
 	err = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	if err != nil {
 		log.Printf("设置写入超时失败: %v", err)
@@ -386,7 +373,40 @@ func handleIPCConnection(conn net.Conn) {
 
 	_, err = conn.Write([]byte("OK"))
 	if err != nil {
-		log.Printf("发送确认信息失败: %v", err)
+		log.Printf("发送确认信息失败: %v（继续处理文件）", err)
+		// 不要 return，继续处理文件
+	}
+
+	// 在UI线程中打开文件（异步，避免阻塞IPC处理）
+	// 注意：由于 mainUI 可能在 IPC 服务器启动后才初始化，需要处理两种情况
+	if len(validFiles) > 0 {
+		if mainUI == nil {
+			log.Println("警告: mainUI 尚未初始化，延迟打开文件")
+			// 情况1: mainUI 还未初始化，启动等待 goroutine
+			go func() {
+				files := validFiles // 捕获文件列表，避免闭包引用问题
+				// 轮询等待 mainUI 初始化（最多等待 5 秒）
+				for i := 0; i < mainUIInitMaxRetries; i++ {
+					if mainUI != nil {
+						break
+					}
+					time.Sleep(mainUIInitRetryInterval)
+				}
+
+				if mainUI == nil {
+					log.Println("错误: mainUI 初始化超时，无法打开文件")
+					return
+				}
+
+				log.Println("mainUI 已初始化，准备打开文件")
+				openFilesAndSelectLast(files)
+			}()
+			return
+		}
+
+		// 情况2: mainUI 已经初始化完成，直接打开文件
+		log.Println("mainUI 已就绪，直接打开文件")
+		openFilesAndSelectLast(validFiles)
 	}
 }
 
