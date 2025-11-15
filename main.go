@@ -193,7 +193,7 @@ func setupLogger() {
 	log.Printf("日志文件位置: %s", logFilePath)
 }
 
-// isAppRunning 检查应用程序是否已在运行（通过检查锁文件）
+// isAppRunning 检查应用程序是否已在运行（通过检查锁文件和进程）
 func isAppRunning() bool {
 	log.Println("检查应用程序是否已在运行...")
 
@@ -210,21 +210,59 @@ func isAppRunning() bool {
 		return false
 	}
 
+	// 读取锁文件中的进程ID
+	buf := make([]byte, 32)
+	n, err := file.Read(buf)
+	if err != nil && err != io.EOF {
+		log.Printf("读取锁文件进程ID失败: %v", err)
+	}
+
+	var pid int
+	if n > 0 {
+		_, err = fmt.Sscanf(string(buf[:n]), "%d", &pid)
+		if err != nil {
+			log.Printf("解析进程ID失败: %v", err)
+		} else {
+			log.Printf("锁文件中的进程ID: %d", pid)
+		}
+	}
+
 	// 尝试获取文件锁
 	err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err != nil {
-		// 无法获取锁，说明文件已被锁定，程序已在运行
+		// 无法获取锁，可能程序正在运行
+		// 但还需要验证进程是否真的存在
+		if pid > 0 {
+			// 检查进程是否存活（在Unix系统上，os.FindProcess总是成功，需要用Signal(0)验证）
+			process, _ := os.FindProcess(pid)
+
+			// 发送信号0检查进程是否存活
+			err = process.Signal(syscall.Signal(0))
+			if err != nil {
+				log.Printf("进程 %d 不存在或无权访问: %v，清理僵尸锁文件", pid, err)
+				// 进程不存在，先关闭文件再清理
+				file.Close()
+				os.Remove(lockFile)
+				os.Remove(ipcAddr)
+				return false
+			}
+
+			log.Printf("进程 %d 正在运行，程序已在运行", pid)
+			file.Close()
+			return true
+		}
+
 		log.Println("无法获取文件锁，程序已在运行")
 		file.Close()
 		return true
 	}
 
-	// 能够获取锁，但这意味着程序没有正确退出
-	// 解锁并删除这个过时的锁文件
-	log.Println("获取到锁，但之前程序可能未正常退出，删除旧锁文件")
+	// 能够获取锁，说明之前的程序已退出但未清理锁文件
+	log.Println("获取到锁，之前程序已退出，清理僵尸锁文件")
 	syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 	file.Close()
 	os.Remove(lockFile)
+	os.Remove(ipcAddr)
 	return false
 }
 
@@ -337,8 +375,21 @@ func openFilesAndSelectLast(files []string) {
 // 从客户端接收文件列表，验证文件，然后在UI中打开这些文件
 // 注意：此函数在 goroutine 中运行，需要使用 fyne.Do() 来操作UI
 func handleIPCConnection(conn net.Conn) {
-	defer conn.Close()
-	log.Println("处理IPC连接...")
+	// 添加panic recovery
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("IPC处理发生panic: %v", r)
+			// 尝试发送错误信息（带超时和错误处理）
+			conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+			if _, err := conn.Write([]byte("ERROR: Internal panic")); err != nil {
+				log.Printf("发送panic错误信息失败: %v", err)
+			}
+		}
+		conn.Close()
+		log.Println("IPC连接已关闭")
+	}()
+
+	log.Println("开始处理IPC连接...")
 
 	// 使用带超时的读取
 	err := conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -371,6 +422,7 @@ func handleIPCConnection(conn net.Conn) {
 		log.Printf("设置写入超时失败: %v", err)
 	}
 
+	log.Println("准备发送确认信息...")
 	_, err = conn.Write([]byte("OK"))
 	if err != nil {
 		log.Printf("发送确认信息失败: %v（继续处理文件）", err)
