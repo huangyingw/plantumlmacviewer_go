@@ -74,9 +74,22 @@ func main() {
 		flag.PrintDefaults()
 		fmt.Println("\n支持的文件类型: .puml, .plantuml, .pu")
 		fmt.Println("\n快捷键:")
-		fmt.Println("  Tab 或 PageDown: 下一个标签页")
-		fmt.Println("  PageUp: 上一个标签页")
-		fmt.Println("  Alt+←/→: 上一个/下一个标签页 (某些系统上)")
+		fmt.Println("  Tab: 下一个标签页")
+		fmt.Println("  ←/→: 上一个/下一个标签页")
+		fmt.Println("  Cmd+W: 关闭当前标签页")
+		fmt.Println("\n缩放控制:")
+		fmt.Println("  Shift+J: 放大图像 (+10%)")
+		fmt.Println("  Shift+K: 缩小图像 (-10%)")
+		fmt.Println("  0: 适应窗口")
+		fmt.Println("\n平移控制 (Vim 风格):")
+		fmt.Println("  h: 向左平移")
+		fmt.Println("  j: 向下平移")
+		fmt.Println("  k: 向上平移")
+		fmt.Println("  l: 向右平移")
+		fmt.Println("\n其他:")
+		fmt.Println("  F11: 切换全屏模式")
+		fmt.Println("  F10: 最大化窗口")
+		fmt.Println("  ESC: 退出全屏")
 		os.Exit(0)
 	}
 
@@ -526,6 +539,24 @@ func setupShortcuts() {
 			mainUI.NextTab()
 			// 立即请求焦点回到主窗口
 			mainWindow.RequestFocus()
+		case fyne.Key0: // 0 键 - 适应窗口
+			log.Println("处理 0 键: 适应窗口")
+			if viewer := mainUI.GetCurrentViewer(); viewer != nil {
+				viewer.FitToWindow()
+			}
+		case fyne.KeyH: // h 键 - 向左平移（vim 风格）
+			log.Println("处理 h 键: 向左平移")
+			if viewer := mainUI.GetCurrentViewer(); viewer != nil {
+				viewer.Pan(-50, 0)
+			}
+		case fyne.KeyL: // l 键 - 向右平移（vim 风格）
+			log.Println("处理 l 键: 向右平移")
+			if viewer := mainUI.GetCurrentViewer(); viewer != nil {
+				viewer.Pan(50, 0)
+			}
+		// 注意：J/K 键不在这里处理，在 SetOnTypedRune 中根据大小写处理
+		// - 小写 j/k: 平移
+		// - 大写 J/K (Shift+j/k): 缩放
 		case fyne.KeyLeft:
 			log.Println("处理左方向键: 上一标签页")
 			mainUI.PrevTab()
@@ -589,8 +620,39 @@ func setupShortcuts() {
 	// 确保窗口始终获取焦点
 	mainWindow.RequestFocus()
 
-	// 修复Tab键后焦点问题 - 监听窗口获取焦点的事件
+	// 捕获字符输入事件（用于处理 Shift+J/K 缩放）
 	mainWindow.Canvas().SetOnTypedRune(func(r rune) {
+		log.Printf("接收到字符输入: %c (0x%x)", r, r)
+
+		// 确保 mainUI 已初始化
+		if mainUI == nil {
+			return
+		}
+
+		// 处理 J/K 按键（根据大小写区分缩放和平移）
+		switch r {
+		case 'J': // Shift+J - 放大
+			log.Println("处理 Shift+J: 放大图像")
+			if viewer := mainUI.GetCurrentViewer(); viewer != nil {
+				viewer.ZoomIn()
+			}
+		case 'K': // Shift+K - 缩小
+			log.Println("处理 Shift+K: 缩小图像")
+			if viewer := mainUI.GetCurrentViewer(); viewer != nil {
+				viewer.ZoomOut()
+			}
+		case 'j': // j - 向下平移
+			log.Println("处理 j 键: 向下平移")
+			if viewer := mainUI.GetCurrentViewer(); viewer != nil {
+				viewer.Pan(0, 50)
+			}
+		case 'k': // k - 向上平移
+			log.Println("处理 k 键: 向上平移")
+			if viewer := mainUI.GetCurrentViewer(); viewer != nil {
+				viewer.Pan(0, -50)
+			}
+		}
+
 		// 在任何字符输入后重新请求焦点，这有助于保持键盘事件的响应
 		mainWindow.RequestFocus()
 	})

@@ -3,12 +3,15 @@ package plantuml
 import (
 	"bytes"
 	"fmt"
+	"image"
+	_ "image/png" // 导入 PNG 解码器
 	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -17,16 +20,92 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// 缩放和平移相关常量
+const (
+	MinZoomScale       = 0.1   // 最小缩放比例 (10%)
+	MaxZoomScale       = 5.0   // 最大缩放比例 (500%)
+	ZoomStep           = 1.1   // 缩放步进 (10%)
+	PanStep            = 50.0  // 平移步进 (像素)
+	FitToWindowMargin  = 0.95  // 适应窗口时的边距比例
+	MinContainerSize   = 200.0 // 最小容器尺寸，用于检测布局是否完成
+	FitToWindowRetries = 5     // FitToWindow 最大重试次数
+	FitToWindowDelay   = 200   // FitToWindow 重试延迟 (毫秒)
+)
+
+// scalableImageContainer 是一个可缩放的图像容器
+// 实现 fyne.CanvasObject 接口，支持设置 MinSize
+type scalableImageContainer struct {
+	widget.BaseWidget
+	image   *canvas.Image
+	minSize fyne.Size
+}
+
+func newScalableImageContainer(img *canvas.Image) *scalableImageContainer {
+	c := &scalableImageContainer{
+		image:   img,
+		minSize: fyne.NewSize(100, 100),
+	}
+	c.ExtendBaseWidget(c)
+	return c
+}
+
+func (c *scalableImageContainer) CreateRenderer() fyne.WidgetRenderer {
+	return &scalableImageRenderer{
+		container: c,
+		image:     c.image,
+	}
+}
+
+func (c *scalableImageContainer) SetMinSize(size fyne.Size) {
+	c.minSize = size
+	// 不在这里调用 Refresh，由调用者负责刷新
+}
+
+func (c *scalableImageContainer) MinSize() fyne.Size {
+	return c.minSize
+}
+
+type scalableImageRenderer struct {
+	container *scalableImageContainer
+	image     *canvas.Image
+}
+
+func (r *scalableImageRenderer) Layout(size fyne.Size) {
+	r.image.Resize(size)
+	r.image.Move(fyne.NewPos(0, 0))
+}
+
+func (r *scalableImageRenderer) MinSize() fyne.Size {
+	return r.container.minSize
+}
+
+func (r *scalableImageRenderer) Refresh() {
+	// Fyne 会自动刷新 Objects() 返回的对象
+	// 不需要手动调用 r.image.Refresh()
+}
+
+func (r *scalableImageRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.image}
+}
+
+func (r *scalableImageRenderer) Destroy() {
+}
+
 // Viewer 表示PlantUML查看器
 type Viewer struct {
 	filePath       string
 	content        string
 	imageView      *canvas.Image
+	imageContainer *scalableImageContainer // 包裹图像的容器，用于控制缩放
 	container      *fyne.Container
+	scroll         *container.Scroll // 滚动容器引用
 	rendered       bool
 	lastModified   time.Time // 文件最后修改时间
 	stopMonitoring chan bool // 停止监控的信号通道
 	onFileChanged  func()    // 文件变化时的回调函数
+	scale          float32   // 缩放比例（1.0 = 100%）
+	originalSize   fyne.Size // 原始图片大小
+	mu             sync.RWMutex // 保护 scale 和 originalSize 的并发访问
 }
 
 // NewViewer 创建新的PlantUML查看器
@@ -49,6 +128,7 @@ func NewViewer(filePath string) (*Viewer, error) {
 		content:        string(content),
 		lastModified:   fileInfo.ModTime(),
 		stopMonitoring: make(chan bool),
+		scale:          1.0, // 初始缩放比例 100%
 	}
 
 	// 初始化UI组件
@@ -73,11 +153,15 @@ func NewViewer(filePath string) (*Viewer, error) {
 func (v *Viewer) initComponents() {
 	// 创建用于显示渲染图像的组件
 	v.imageView = &canvas.Image{}
-	v.imageView.FillMode = canvas.ImageFillContain   // 内容适应屏幕
+	v.imageView.FillMode = canvas.ImageFillOriginal  // 使用原始大小，不自动缩放
 	v.imageView.ScaleMode = canvas.ImageScaleFastest // 使用最快的缩放模式，提高性能
 
-	// 创建容器
-	v.container = container.NewMax(container.NewScroll(v.imageView))
+	// 创建一个可缩放的容器包裹图像，用于控制缩放
+	v.imageContainer = newScalableImageContainer(v.imageView)
+
+	// 创建滚动容器并保存引用
+	v.scroll = container.NewScroll(v.imageContainer)
+	v.container = container.NewMax(v.scroll)
 }
 
 // GetCanvas 返回查看器的Canvas对象
@@ -110,9 +194,32 @@ func (v *Viewer) renderPlantUML() {
 	// 渲染成功，更新UI
 	fyne.Do(func() {
 		v.imageView.Resource = img
-		v.container.Objects[0] = container.NewScroll(v.imageView)
-		v.container.Refresh()
+		v.imageView.Refresh()
 		v.rendered = true
+
+		// 延迟适应窗口大小（等待布局完成）
+		// 使用多次重试以确保布局完成，成功后立即停止
+		go func() {
+			for i := 0; i < FitToWindowRetries; i++ {
+				time.Sleep(FitToWindowDelay * time.Millisecond)
+
+				done := make(chan bool)
+				fyne.Do(func() {
+					success := false
+					if v.scroll != nil &&
+					   v.scroll.Size().Width >= MinContainerSize &&
+					   v.scroll.Size().Height >= MinContainerSize {
+						v.FitToWindow()
+						success = true
+					}
+					done <- success
+				})
+
+				if <-done {
+					break  // 成功则退出循环
+				}
+			}
+		}()
 	})
 
 	log.Printf("成功渲染文件: %s", v.filePath)
@@ -224,6 +331,16 @@ func (v *Viewer) renderUsingJar() (fyne.Resource, error) {
 
 	log.Printf("成功读取图像文件，大小: %d 字节", len(imgData))
 
+	// 解码图像获取原始尺寸
+	img, _, err := image.Decode(bytes.NewReader(imgData))
+	if err != nil {
+		log.Printf("警告：无法解码图像以获取尺寸: %v", err)
+	} else {
+		bounds := img.Bounds()
+		v.originalSize = fyne.NewSize(float32(bounds.Dx()), float32(bounds.Dy()))
+		log.Printf("保存原始图像尺寸: %dx%d", bounds.Dx(), bounds.Dy())
+	}
+
 	// 创建 Fyne 资源
 	res := fyne.NewStaticResource("plantuml_image.png", imgData)
 	return res, nil
@@ -278,6 +395,16 @@ func (v *Viewer) renderUsingCommandLine() (fyne.Resource, error) {
 
 	log.Printf("成功读取图像文件，大小: %d 字节", len(imgData))
 
+	// 解码图像获取原始尺寸
+	img, _, err := image.Decode(bytes.NewReader(imgData))
+	if err != nil {
+		log.Printf("警告：无法解码图像以获取尺寸: %v", err)
+	} else {
+		bounds := img.Bounds()
+		v.originalSize = fyne.NewSize(float32(bounds.Dx()), float32(bounds.Dy()))
+		log.Printf("保存原始图像尺寸: %dx%d", bounds.Dx(), bounds.Dy())
+	}
+
 	// 创建 Fyne 资源
 	res := fyne.NewStaticResource("plantuml_image.png", imgData)
 	return res, nil
@@ -331,9 +458,32 @@ func (v *Viewer) renderSynchronously() error {
 
 	// 渲染成功，更新UI
 	v.imageView.Resource = img
-	v.container.Objects[0] = container.NewScroll(v.imageView)
-	v.container.Refresh()
+	v.imageView.Refresh()
 	v.rendered = true
+
+	// 延迟适应窗口大小（等待布局完成）
+	// 使用多次重试以确保布局完成，成功后立即停止
+	go func() {
+		for i := 0; i < FitToWindowRetries; i++ {
+			time.Sleep(FitToWindowDelay * time.Millisecond)
+
+			done := make(chan bool)
+			fyne.Do(func() {
+				success := false
+				if v.scroll != nil &&
+				   v.scroll.Size().Width >= MinContainerSize &&
+				   v.scroll.Size().Height >= MinContainerSize {
+					v.FitToWindow()
+					success = true
+				}
+				done <- success
+			})
+
+			if <-done {
+				break  // 成功则退出循环
+			}
+		}
+	}()
 
 	log.Printf("成功同步渲染文件: %s", v.filePath)
 	return nil
@@ -424,4 +574,116 @@ func (v *Viewer) StopMonitoring() {
 // SetOnFileChanged 设置文件变化时的回调函数
 func (v *Viewer) SetOnFileChanged(callback func()) {
 	v.onFileChanged = callback
+}
+
+// ZoomIn 放大图像
+func (v *Viewer) ZoomIn() {
+	v.mu.RLock()
+	currentScale := v.scale
+	v.mu.RUnlock()
+
+	v.setZoom(currentScale * ZoomStep)
+}
+
+// ZoomOut 缩小图像
+func (v *Viewer) ZoomOut() {
+	v.mu.RLock()
+	currentScale := v.scale
+	v.mu.RUnlock()
+
+	v.setZoom(currentScale / ZoomStep)
+}
+
+// ResetZoom 重置缩放为 100%
+func (v *Viewer) ResetZoom() {
+	v.setZoom(1.0)
+}
+
+// setZoom 设置缩放比例
+// 注意：此方法必须在 UI 线程中调用
+func (v *Viewer) setZoom(newScale float32) {
+	// 限制缩放范围
+	if newScale < MinZoomScale {
+		newScale = MinZoomScale
+	} else if newScale > MaxZoomScale {
+		newScale = MaxZoomScale
+	}
+
+	v.mu.Lock()
+	v.scale = newScale
+	originalSize := v.originalSize
+	v.mu.Unlock()
+
+	// 应用缩放
+	if v.imageView != nil && v.imageView.Resource != nil && originalSize.Width > 0 {
+		newWidth := originalSize.Width * newScale
+		newHeight := originalSize.Height * newScale
+		newSize := fyne.NewSize(newWidth, newHeight)
+
+		// 设置容器的 MinSize，这样滚动容器才知道内容有多大
+		v.imageContainer.SetMinSize(newSize)
+
+		// 刷新容器和滚动容器
+		v.imageContainer.Refresh()
+		if v.scroll != nil {
+			v.scroll.Refresh()
+		}
+	}
+}
+
+// Pan 平移图像
+// 注意：此方法必须在 UI 线程中调用
+func (v *Viewer) Pan(dx, dy float32) {
+	if v.scroll == nil {
+		return
+	}
+
+	// 获取当前滚动位置
+	currentPos := v.scroll.Offset
+
+	// 计算新位置
+	newPos := fyne.NewPos(currentPos.X+dx, currentPos.Y+dy)
+
+	// 使用 ScrollToOffset 方法设置新的滚动位置
+	v.scroll.ScrollToOffset(newPos)
+}
+
+// FitToWindow 使图像适应窗口大小
+// 注意：此方法必须在 UI 线程中调用
+func (v *Viewer) FitToWindow() {
+	if v.scroll == nil || v.originalSize.Width == 0 || v.originalSize.Height == 0 {
+		log.Printf("警告：无法适应窗口，scroll 或 originalSize 未初始化")
+		return
+	}
+
+	// 获取滚动容器的大小
+	scrollSize := v.scroll.Size()
+	if scrollSize.Width == 0 || scrollSize.Height == 0 {
+		log.Printf("警告：滚动容器尺寸为零，稍后重试")
+		return
+	}
+
+	// 检查容器尺寸是否合理（至少 200x200），避免在布局未完成时计算
+	if scrollSize.Width < 200 || scrollSize.Height < 200 {
+		log.Printf("警告：滚动容器尺寸太小 (%.0fx%.0f)，可能布局未完成，跳过适应窗口",
+			scrollSize.Width, scrollSize.Height)
+		return
+	}
+
+	// 计算两个方向的缩放比例
+	scaleX := scrollSize.Width / v.originalSize.Width
+	scaleY := scrollSize.Height / v.originalSize.Height
+
+	// 选择较小的缩放比例，确保图像完全可见
+	fitScale := fyne.Min(scaleX, scaleY)
+
+	// 稍微缩小一点，留出边距（95%）
+	fitScale = fitScale * 0.95
+
+	log.Printf("适应窗口：容器尺寸 %.0fx%.0f，原始尺寸 %.0fx%.0f，缩放比例 %.2f",
+		scrollSize.Width, scrollSize.Height,
+		v.originalSize.Width, v.originalSize.Height,
+		fitScale)
+
+	v.setZoom(fitScale)
 }

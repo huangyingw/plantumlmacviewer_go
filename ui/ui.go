@@ -329,3 +329,28 @@ func (ui *MainUI) CloseCurrentTab() {
 	// 让标签容器处理关闭逻辑（会触发OnClosed回调）
 	ui.Tabs.RemoveIndex(currentIndex)
 }
+
+// GetCurrentViewer 获取当前激活标签页对应的 Viewer
+func (ui *MainUI) GetCurrentViewer() *plantuml.Viewer {
+	if ui.Tabs == nil || len(ui.Tabs.Items) == 0 {
+		return nil
+	}
+
+	currentIndex := ui.Tabs.SelectedIndex()
+	if currentIndex < 0 || currentIndex >= len(ui.Tabs.Items) {
+		return nil
+	}
+
+	// 查找当前标签对应的文件路径
+	for path, index := range ui.OpenedFiles {
+		if index == currentIndex {
+			// 返回对应的 viewer
+			if viewer, exists := ui.viewers[path]; exists {
+				return viewer
+			}
+			break
+		}
+	}
+
+	return nil
+}
