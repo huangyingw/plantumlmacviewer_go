@@ -341,6 +341,12 @@ func (v *Viewer) renderUsingJar() (fyne.Resource, error) {
 		log.Printf("保存原始图像尺寸: %dx%d", bounds.Dx(), bounds.Dy())
 	}
 
+	// 自动导出 PNG 到源文件所在目录
+	if err := v.exportPNG(imgData); err != nil {
+		log.Printf("警告：自动导出 PNG 失败: %v", err)
+		// 导出失败不影响正常显示，继续执行
+	}
+
 	// 创建 Fyne 资源
 	res := fyne.NewStaticResource("plantuml_image.png", imgData)
 	return res, nil
@@ -403,6 +409,12 @@ func (v *Viewer) renderUsingCommandLine() (fyne.Resource, error) {
 		bounds := img.Bounds()
 		v.originalSize = fyne.NewSize(float32(bounds.Dx()), float32(bounds.Dy()))
 		log.Printf("保存原始图像尺寸: %dx%d", bounds.Dx(), bounds.Dy())
+	}
+
+	// 自动导出 PNG 到源文件所在目录
+	if err := v.exportPNG(imgData); err != nil {
+		log.Printf("警告：自动导出 PNG 失败: %v", err)
+		// 导出失败不影响正常显示，继续执行
 	}
 
 	// 创建 Fyne 资源
@@ -646,6 +658,26 @@ func (v *Viewer) Pan(dx, dy float32) {
 
 	// 使用 ScrollToOffset 方法设置新的滚动位置
 	v.scroll.ScrollToOffset(newPos)
+}
+
+// exportPNG 将渲染后的 PNG 图片导出到源文件所在目录
+// 导出的文件名与源文件相同，只是扩展名改为 .png
+func (v *Viewer) exportPNG(imgData []byte) error {
+	// 计算导出路径：与源文件相同目录，相同文件名，扩展名改为 .png
+	dir := filepath.Dir(v.filePath)
+	baseName := filepath.Base(v.filePath)
+	pngName := strings.TrimSuffix(baseName, filepath.Ext(baseName)) + ".png"
+	exportPath := filepath.Join(dir, pngName)
+
+	// 写入 PNG 文件
+	err := os.WriteFile(exportPath, imgData, 0644)
+	if err != nil {
+		log.Printf("导出 PNG 失败: %v", err)
+		return fmt.Errorf("无法导出 PNG 到 %s: %v", exportPath, err)
+	}
+
+	log.Printf("成功导出 PNG 到: %s", exportPath)
+	return nil
 }
 
 // FitToWindow 使图像适应窗口大小
